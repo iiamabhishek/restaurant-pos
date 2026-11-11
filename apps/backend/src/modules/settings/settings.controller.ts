@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags } from '@nestjs/swagger';
+import { persistUploadedImage } from '../../common/upload/object-storage';
 import {
   branchSettingsSchema,
   restaurantSettingsSchema,
@@ -73,7 +74,7 @@ export class SettingsController {
   @Auth('settings.manage')
   @Post('restaurant/logo')
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
-  uploadRestaurantLogo(@UploadedFile() file?: Express.Multer.File) {
+  async uploadRestaurantLogo(@UploadedFile() file?: Express.Multer.File) {
     if (!file) {
       throw new BadRequestException('No file uploaded');
     }
@@ -81,6 +82,9 @@ export class SettingsController {
     // checking the bytes on disk before this URL is saved and served back
     // publicly as the restaurant's branding.
     assertValidImageSignature(file.path);
+    // Ephemeral-filesystem hosts: also persist to object storage (no-op on
+    // self-hosted volumes) — see object-storage.ts.
+    await persistUploadedImage(file);
     return { url: `/api/uploads/${file.filename}` };
   }
 

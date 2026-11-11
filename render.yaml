@@ -51,14 +51,23 @@ services:
       # Render terminates TLS at one proxy hop; needed for correct client IPs.
       - key: TRUST_PROXY
         value: "1"
-      # Persistent disk below (requires a paid instance type). On the free
-      # tier remove the `disk:` block — uploads then reset on every deploy.
+      # Free tier: no persistent disks exist, so uploads live in /tmp and
+      # are ALSO persisted to Supabase Storage (see the SUPABASE_S3_* vars
+      # below and apps/backend/src/common/upload/object-storage.ts).
       - key: UPLOADS_DIR
-        value: /data/uploads
-    disk:
-      name: orderrestro-uploads
-      mountPath: /data
-      sizeGB: 1
+        value: /tmp/uploads
+      # Ephemeral-filesystem hosts: set these so uploaded images survive
+      # cold starts via Supabase Storage (see apps/backend/.env.example).
+      - key: SUPABASE_S3_ENDPOINT
+        sync: false
+      - key: SUPABASE_S3_REGION
+        value: ap-south-1
+      - key: SUPABASE_S3_BUCKET
+        sync: false
+      - key: SUPABASE_S3_ACCESS_KEY_ID
+        sync: false
+      - key: SUPABASE_S3_SECRET_ACCESS_KEY
+        sync: false
 
   # Next.js dashboard — BACKEND_URL is a build arg (rewrite destinations are
   # baked at build time, see apps/web/next.config.ts).

@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags } from '@nestjs/swagger';
+import { persistUploadedImage } from '../../common/upload/object-storage';
 import {
   menuCategorySchema,
   menuItemSchema,
@@ -172,7 +173,7 @@ export class MenuController {
   @Auth('menu.manage')
   @Post('items/upload-image')
   @UseInterceptors(FileInterceptor('file', imageUploadOptions))
-  uploadItemImage(@UploadedFile() file?: Express.Multer.File) {
+  async uploadItemImage(@UploadedFile() file?: Express.Multer.File) {
     if (!file) {
       throw new BadRequestException('No file uploaded');
     }
@@ -181,6 +182,11 @@ export class MenuController {
     // actually on disk match a real image signature before this URL is
     // ever handed back to be saved on a menu item and served publicly.
     assertValidImageSignature(file.path);
+    // Ephemeral-filesystem hosts (Render free tier, serverless): also
+    // persist the image to object storage so /api/uploads/<file> keeps
+    // resolving after a cold start wipes the local disk. No-op on
+    // self-hosted volumes — see object-storage.ts.
+    await persistUploadedImage(file);
     return { url: `/api/uploads/${file.filename}` };
   }
 
