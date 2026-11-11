@@ -1,0 +1,76 @@
+# Render Blueprint — Nodedr OrderRestro (apps on Render, database on Supabase)
+#
+# Deploy once: Render Dashboard → New + → Blueprint → connect this GitHub repo
+# (iiamabhishek/restaurant-pos) → pick branch release_v1.1 → Apply.
+# Render creates both services below and syncs them on every push to
+# release_v1.1 (autoDeploy).
+#
+# After the first apply, fill in the two sync:false env vars (Render prompts
+# you in the apply dialog):
+#   api  DATABASE_URL  → Supabase POOLED connection string (port 6543, ...pooler.supabase.com)
+#   api  DIRECT_URL    → Supabase DIRECT connection string (port 5432, db.<ref>.supabase.co)
+#   api  CORS_ORIGIN   → the web service's final URL (e.g. https://orderrestro-web-xxxx.onrender.com)
+#   web  BACKEND_URL   → the api service's final URL (e.g. https://orderrestro-api-xxxx.onrender.com)
+#   (BACKEND_URL is baked into the Next.js build — after setting it, redeploy
+#    the web service once: Manual Deploy → Deploy latest commit.)
+#
+# Prisma migrations run on every api deploy via the Dockerfile CMD
+# (prisma migrate deploy) using DIRECT_URL, while the app itself talks to the
+# pooled URL — the standard Supabase production pattern.
+
+services:
+  # NestJS API — long-running server (websockets, USB printing, local uploads)
+  - type: web
+    name: orderrestro-api
+    runtime: docker
+    dockerfilePath: ./apps/backend/Dockerfile
+    dockerContext: .
+    branch: release_v1.1
+    autoDeploy: true
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      # Render generates a strong random value at apply time (32+ chars,
+      # satisfying the backend's own secret validation in src/main.ts).
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 12h
+      # Encrypts saved third-party integration credentials at rest.
+      - key: INTEGRATION_SECRET_KEY
+        generateValue: true
+      # Set after the web service exists — the only origin allowed (no "*",
+      # credentials are on).
+      - key: CORS_ORIGIN
+        sync: false
+      # Render terminates TLS at one proxy hop; needed for correct client IPs.
+      - key: TRUST_PROXY
+        value: "1"
+      # Persistent disk below (requires a paid instance type). On the free
+      # tier remove the `disk:` block — uploads then reset on every deploy.
+      - key: UPLOADS_DIR
+        value: /data/uploads
+    disk:
+      name: orderrestro-uploads
+      mountPath: /data
+      sizeGB: 1
+
+  # Next.js dashboard — BACKEND_URL is a build arg (rewrite destinations are
+  # baked at build time, see apps/web/next.config.ts).
+  - type: web
+    name: orderrestro-web
+    runtime: docker
+    dockerfilePath: ./apps/web/Dockerfile
+    dockerContext: .
+    branch: release_v1.1
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      # Final api service URL, e.g. https://orderrestro-api-xxxx.onrender.com
+      - key: BACKEND_URL
+        sync: false
