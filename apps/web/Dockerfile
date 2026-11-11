@@ -36,6 +36,11 @@ RUN pnpm --filter web build
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Kubernetes (Render) sets HOSTNAME to the pod's own name; Next's standalone
+# server uses it as the bind address, which only that hostname's interface
+# can reach — the platform proxy then 502s every request. Bind all
+# interfaces explicitly (identical behavior to a plain `app.listen(port)`).
+ENV HOSTNAME=0.0.0.0
 
 # The standalone server (apps/web/server.js) resolves `public/` and
 # `.next/static` relative to ITS OWN traced monorepo path, i.e.
