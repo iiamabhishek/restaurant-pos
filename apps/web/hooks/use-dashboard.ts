@@ -6,6 +6,9 @@ import { api } from "@/lib/api";
 export interface DashboardSummary {
   todayRevenue: number;
   todayOrders: number;
+  /** Money recorded as spent today. Role-gated on the server: null when the
+   * signed-in role may not see accounting figures. */
+  todayExpenses: number | null;
   channels: { online: number; offline: number };
   tables: {
     available: number;

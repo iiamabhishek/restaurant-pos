@@ -1,7 +1,7 @@
 "use client";
 
 import { BranchNotice } from "@/components/layout/branch-notice";
-import { AlertTriangle, ChefHat, SlidersHorizontal, ClipboardList, Flame, Globe, HandCoins, ReceiptText, Store, Timer, TrendingUp, Trash2, UserRound, Users, Wallet } from "lucide-react";
+import { AlertTriangle, ChefHat, CircleDollarSign, SlidersHorizontal, ClipboardList, Flame, Globe, HandCoins, ReceiptText, Store, Timer, TrendingUp, Trash2, UserRound, Users, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { QuickActions } from "@/components/dashboard/quick-actions";
@@ -227,6 +227,18 @@ export default function DashboardPage() {
             icon={ReceiptText}
             href="/orders?tab=history"
           />
+          {/* Rendered only for roles that can see accounting figures
+              (server returns null otherwise) — cashiers see revenue, not
+              outgoings. */}
+          {data.todayExpenses !== null && (
+            <StatCard
+              label="Today's Expenses"
+              value={formatCurrency(data.todayExpenses)}
+              icon={CircleDollarSign}
+              accent={data.todayExpenses > 0 ? "warning" : undefined}
+              href="/accounting"
+            />
+          )}
           <StatCard
             label="Occupied Tables"
             value={String(data.tables.occupied)}

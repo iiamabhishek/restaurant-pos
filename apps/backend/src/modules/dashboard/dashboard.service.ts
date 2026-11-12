@@ -11,6 +11,8 @@ export class DashboardService {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
 
+    const has = (p: string) => permissions.includes(p);
+
     const [
       revenueAgg,
       ordersToday,
@@ -18,6 +20,10 @@ export class DashboardService {
       tableCounts,
       kitchenQueue,
       recentOrders,
+      // Money recorded as spent today. Only fetched for roles allowed to
+      // manage accounting — a cashier sees the day's revenue but not the
+      // day's outgoings (null tells the UI to hide the card).
+      expenseAgg,
     ] = await Promise.all([
       this.prisma.order.aggregate({
         where: { branchId, status: 'PAID', billedAt: { gte: startOfDay } },
@@ -56,9 +62,14 @@ export class DashboardService {
           billedAt: true,
         },
       }),
+      has('accounting.manage')
+        ? this.prisma.expense.aggregate({
+            where: { branchId, spentOn: { gte: startOfDay } },
+            _sum: { amount: true },
+          })
+        : Promise.resolve(null),
     ]);
 
-    const has = (p: string) => permissions.includes(p);
     const attention = await this.attention(branchId, has);
 
     const tableStatusMap = Object.fromEntries(
@@ -84,6 +95,12 @@ export class DashboardService {
     return {
       todayRevenue: Number(revenueAgg._sum.totalAmount ?? 0),
       todayOrders: ordersToday,
+      // Role-gated like the attention figures below: null when the caller
+      // lacks accounting.manage, so the card is simply not shown.
+      todayExpenses:
+        expenseAgg === null
+          ? null
+          : Math.round(Number(expenseAgg._sum.amount ?? 0) * 100) / 100,
       channels,
       tables: {
         available: tableStatusMap.AVAILABLE ?? 0,
