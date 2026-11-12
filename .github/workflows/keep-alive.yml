@@ -1,22 +1,21 @@
 # Free-tier keep-alive: Render spins down a Free web service after 15 min
-# without inbound HTTP (https://render.com/docs/free). This pings the web
-# service every 10 min so it stays up through the cafe's active hours.
+# without inbound HTTP (https://render.com/docs/free). This pings BOTH the
+# web and API services every 10 min so they stay up through the cafe's
+# active hours.
 #
-# The ping hits "/" (static page) only — it deliberately does NOT touch the
-# backend, so the backend still sleeps (and saves free instance hours) when
-# idle; it spins up on demand via the web app's API proxy.
+# Hours budget (750/month workspace cap, shared by ALL free services):
+# both awake ~09:30-20:35 IST = ~11h/day each -> ~660h/month, ~90h margin.
+# Both sleep ~20:35-09:30 IST per owner. Do NOT widen these windows without
+# re-checking the math: 750 / 30 days = 25h/day total across both services.
 #
-# Hours budget (750/month workspace cap): awake ~07:30-02:30 IST = ~19h/day
-# for web (~570h) + organic usage ≈ 660/750. Sleeps 02:30-07:30 IST per owner.
-#
-# Schedule runs on UTC; 02:00-20:59 UTC = 07:30-02:29 IST.
+# Schedule runs on UTC; 04:00-14:50 UTC = 09:30-20:20 IST.
 # Note: GitHub Actions cron can fire a few minutes late; harmless here —
 # a missed beat just means the service wakes on demand (~1 min cold start).
 name: keep-alive
 
 on:
   schedule:
-    - cron: "*/10 2-20 * * *"
+    - cron: "*/10 4-14 * * *"
   workflow_dispatch: {} # manual trigger for testing
 
 permissions: {}
@@ -28,3 +27,6 @@ jobs:
     steps:
       - name: Ping web service
         run: curl -fsS --max-time 90 https://thetwoyaarcafe-web.onrender.com/ > /dev/null
+
+      - name: Ping API service
+        run: curl -fsS --max-time 90 https://thetwoyaarcafe-api.onrender.com/api/health > /dev/null
