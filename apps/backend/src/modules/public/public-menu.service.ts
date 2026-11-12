@@ -34,6 +34,18 @@ export class PublicMenuService {
     };
   }
 
+  /** Login-screen branding: the operator's name + logo, or nulls on a fresh
+   * install before first-run signup (the client then shows the product
+   * mark). First restaurant because the login screen has no restaurant
+   * context until someone signs in. */
+  async getInstanceBranding() {
+    const restaurant = await this.prisma.restaurant.findFirst({
+      orderBy: { createdAt: 'asc' },
+      select: { name: true, logoUrl: true },
+    });
+    return restaurant ?? { name: null, logoUrl: null };
+  }
+
   /** Customer-visible menu tree, shared by the table-QR page and the kiosk. */
   menuCategoriesForBranch(branchId: string) {
     return this.prisma.menuCategory.findMany({

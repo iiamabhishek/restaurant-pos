@@ -5,7 +5,7 @@ import { loginSchema, type LoginDto } from "@nodedr-restaurant/types";
 import { motion, useReducedMotion } from "motion/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { AlertCircle } from "lucide-react";
 import { Logo } from "@/components/layout/logo";
@@ -14,7 +14,9 @@ import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { useLogin } from "@/hooks/use-auth";
-import { ApiError } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+
+type Branding = { name: string | null; logoUrl: string | null };
 
 export default function LoginPage() {
   const router = useRouter();
@@ -29,6 +31,27 @@ export default function LoginPage() {
     handleSubmit,
     formState: { errors },
   } = useForm<LoginDto>({ resolver: zodResolver(loginSchema) });
+
+  // The operator's own branding (Settings → General) leads the login screen,
+  // same rule as the sidebar header: this is white-label software, so the
+  // restaurant's mark replaces the product's. Fetched unauthenticated from
+  // the public branding endpoint; until it resolves (or when the instance
+  // has no restaurant yet / is unreachable) the product mark shows, so the
+  // page never blocks or breaks on it.
+  const [branding, setBranding] = useState<Branding | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.get<Branding>("/public/branding")
+      .then((b) => {
+        if (!cancelled) setBranding(b);
+      })
+      .catch(() => {
+        // Fall back to the product mark — decorative, never an error banner.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const onSubmit = (dto: LoginDto) => {
     setError(null);
@@ -68,11 +91,22 @@ export default function LoginPage() {
         className="w-full max-w-sm"
       >
         <div className="mb-10 flex flex-col items-center gap-2 text-center">
-          <Link href="/">
-            <Logo size={44} />
-          </Link>
+          {branding?.logoUrl ? (
+            <Link href="/">
+              {/* eslint-disable-next-line @next/next/no-img-element -- uploaded asset served from the backend, not a Next-optimizable remote source (same as app-shell) */}
+              <img
+                src={branding.logoUrl}
+                alt={branding.name ?? ""}
+                className="h-11 w-11 shrink-0 rounded-lg object-contain"
+              />
+            </Link>
+          ) : (
+            <Link href="/">
+              <Logo size={44} />
+            </Link>
+          )}
           <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-            OrderRestro
+            {branding?.name ?? "OrderRestro"}
           </h1>
           <p className="text-sm text-muted-foreground">Sign in to manage your restaurant</p>
         </div>

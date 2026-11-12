@@ -38,6 +38,20 @@ export class PublicMenuController {
     return this.publicMenuService.getStatus(qrToken);
   }
 
+  // Unauthenticated branding for the login screen: the operator's restaurant
+  // name + logo (Settings → General) lead even before anyone signs in — the
+  // schema comment on Restaurant.logoUrl always intended this. Single value:
+  // the login screen has no restaurant context until a user signs in, so it
+  // shows the instance's first restaurant (the owner account that ran
+  // first-run signup). Falls back to the product mark client-side when no
+  // restaurant exists yet (fresh install pre-signup) — a null name/logo here
+  // is a normal empty state, not an error.
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Get('branding')
+  getBranding() {
+    return this.publicMenuService.getInstanceBranding();
+  }
+
   @Throttle({ default: { limit: 6, ttl: 60_000 } })
   @Post('menu/:qrToken/request')
   @UsePipes(new ZodValidationPipe(publicRequestSchema))
