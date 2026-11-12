@@ -8,7 +8,6 @@ import { EntityDialogHost } from "@/components/layout/entity-dialog-host";
 import { NotificationBell } from "@/components/notifications/notification-bell";
 import { useBranch } from "@/hooks/use-branch";
 import { useDisplaySettings } from "@/hooks/use-settings";
-import { BrandFooter } from "./brand-footer";
 import { BranchSwitcher } from "./branch-switcher";
 import { LanguageSwitcher } from "./language-switcher";
 import { Logo } from "./logo";
@@ -18,9 +17,7 @@ import { UserMenu } from "./user-menu";
 
 // The restaurant's own logo + name lead the sidebar header — this is
 // white-label self-hosted software, so the operator's branding takes the
-// prime spot an operator actually looks at. The OrderRestro product
-// mark moves to a small credit line at the bottom (BrandFooter) instead of
-// competing with it up here. Falls back to the product mark only until the
+// prime spot an operator actually looks at. Falls back to the product mark only until the
 // restaurant sets its own logo/name under Settings.
 function RestaurantBrand() {
   const { branchId } = useBranch();
@@ -75,7 +72,6 @@ export function AppShell({
         <div className="flex-1 overflow-y-auto py-2">
           <SidebarNav user={user} />
         </div>
-        <BrandFooter />
       </aside>
 
       {/* Mobile drawer */}
@@ -91,7 +87,6 @@ export function AppShell({
           <div className="flex-1 overflow-y-auto py-2">
             <SidebarNav user={user} onNavigate={() => setMobileOpen(false)} />
           </div>
-          <BrandFooter />
         </SheetContent>
       </Sheet>
 
