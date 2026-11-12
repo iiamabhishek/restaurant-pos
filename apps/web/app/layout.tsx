@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { AppProviders } from "@/components/providers/app-providers";
+import { BrandHead } from "@/components/layout/brand-head";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -14,7 +15,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "OrderRestro",
+  title: "The Two Yaar Cafe",
   description: "Offline-first restaurant management system",
   manifest: "/manifest.json",
   icons: {
@@ -42,6 +43,7 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col">
         <AppProviders>{children}</AppProviders>
+        <BrandHead />
       </body>
     </html>
   );
