@@ -2,8 +2,16 @@ BEGIN;
 
 -- Only live or financially significant attempts need their order. Terminal
 -- attempts may already outlive it, including rows restored from older backups.
+--
+-- Supabase (and any PostgreSQL where the role isn't superuser) denies SET
+-- clauses on custom parameters in CREATE FUNCTION ("permission denied to set
+-- parameter"). The original `SET app.sync_origin = '__skip'` is therefore
+-- applied and restored around the synthetic UPDATE instead — same net effect.
 CREATE OR REPLACE FUNCTION require_gateway_order() RETURNS trigger
-LANGUAGE plpgsql SET app.sync_origin = '__skip' AS $$
+LANGUAGE plpgsql AS $$
+DECLARE
+  prev_origin text := coalesce(current_setting('app.sync_origin', true), '');
+  order_found boolean;
 BEGIN
   IF NOT (NEW.status::text = ANY(TG_ARGV)) THEN RETURN NULL; END IF;
   IF TG_OP = 'UPDATE' AND OLD."orderId" = NEW."orderId"
@@ -11,10 +19,13 @@ BEGIN
 
   -- Take a parent row lock and create an MVCC version. A DELETE with an
   -- older REPEATABLE READ snapshot must retry, even if the child committed
-  -- before the DELETE began. No business field changes. The function-local
+  -- before the DELETE began. No business field changes. The transaction-local
   -- sync setting suppresses only this synthetic update, not the gateway row.
+  PERFORM set_config('app.sync_origin', '__skip', true);
   UPDATE orders SET "updatedAt" = "updatedAt" WHERE id = NEW."orderId";
-  IF NOT FOUND THEN
+  order_found := FOUND;
+  PERFORM set_config('app.sync_origin', prev_origin, true);
+  IF NOT order_found THEN
     RAISE foreign_key_violation USING CONSTRAINT = 'gateway_order_history',
       MESSAGE = format('insert or update on table "%s" violates foreign key constraint "gateway_order_history"', TG_TABLE_NAME),
       DETAIL = 'Protected gateway activity requires an existing order.';
