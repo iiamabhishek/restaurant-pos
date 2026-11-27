@@ -15,7 +15,11 @@ import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { useLogin } from "@/hooks/use-auth";
 import { useDemoInfo } from "@/hooks/use-demo";
-import { ApiError } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
+
+// Shape of the public branding payload (Settings → General): the operator's
+// own name + logo, or nulls while the instance has neither.
+type Branding = { name: string | null; logoUrl: string | null };
 
 export default function LoginPage() {
   const router = useRouter();

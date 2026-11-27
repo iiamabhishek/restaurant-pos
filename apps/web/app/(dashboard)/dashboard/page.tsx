@@ -245,7 +245,7 @@ export default function DashboardPage() {
           {data.todayExpenses !== null && (
             <StatCard
               label="Today's Expenses"
-              value={formatCurrency(data.todayExpenses)}
+              value={fmt.currency(data.todayExpenses)}
               icon={CircleDollarSign}
               accent={data.todayExpenses > 0 ? "warning" : undefined}
               href="/accounting"
