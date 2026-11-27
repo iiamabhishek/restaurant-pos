@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AuditModule } from '../../audit/audit.module';
 import { BranchAccessService } from '../../common/services/branch-access.service';
 import { NotificationsModule } from '../../notifications/notifications.module';
+import { BillShareModule } from '../bill-share/bill-share.module';
 import { GiftCardsModule } from '../gift-cards/gift-cards.module';
 import { InventoryModule } from '../inventory/inventory.module';
 import { MarketingModule } from '../marketing/marketing.module';
@@ -9,6 +10,7 @@ import { ReferralsModule } from '../referrals/referrals.module';
 import { VerifactuModule } from '../verifactu/verifactu.module';
 import { KotPrintService } from './kot-print.service';
 import { OrdersController } from './orders.controller';
+import { OrdersDuesService } from './orders-dues.service';
 import { OrdersService } from './orders.service';
 import { ScheduledOrdersService } from './scheduled-orders.service';
 
@@ -21,10 +23,12 @@ import { ScheduledOrdersService } from './scheduled-orders.service';
     MarketingModule,
     VerifactuModule,
     ReferralsModule,
+    BillShareModule,
   ],
   controllers: [OrdersController],
   providers: [
     OrdersService,
+    OrdersDuesService,
     KotPrintService,
     ScheduledOrdersService,
     BranchAccessService,

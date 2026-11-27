@@ -74,6 +74,16 @@ Open each from the sidebar and press **Add**.
 | **Customers**: name, phone, allergies, birthday | Loyalty points, gift cards and repeat-visit history | ![Customers](docs/screenshots/tutorial/customers.png) |
 | **Reservations**: bookings and a waitlist | Know who is coming, and when | ![Reservations](docs/screenshots/tutorial/reservations.png) |
 
+### Pause a dish during service
+
+If the next tray of lasagna will be ready in half an hour, open **Menu** for the selling branch, find the dish and choose **Pause sales → For 30 minutes**. You can also choose **Until a specific time** and enter the return time on the restaurant's clock. A time that has already passed means the next occurrence.
+
+The POS, table QR menu and kiosk show when the dish returns. It becomes available automatically at that time. If the kitchen is ready sooner, choose **Resume sales** in Menu. Staff can still settle orders that already include the dish.
+
+At shift change, open [**Menu → Paused**](docs/screenshots/menu-paused-list-en.png) to see every paused dish at the selected branch, with the earliest return first. On a phone, choose [**Paused** in the category picker](docs/screenshots/menu-paused-list-mobile-en.png). The count and list update when a pause expires or you resume sales early.
+
+See the [manager's pause dialog](docs/screenshots/menu-pause-editor-en.png), the [cashier's screen](docs/screenshots/menu-pause-pos-en.png) and the [guest's QR menu](docs/screenshots/menu-pause-qr-en.png).
+
 ## 4. Take an order
 
 1. Open **Point of Sale**, pick a table (or choose **Takeaway** / **Delivery**).
@@ -192,6 +202,7 @@ Staff **clock in and out** from **Attendance** and can request leave. Managers s
 | **Waste** | Log spoilage, deducted first-in-first-out at the real batch cost | ![Waste](docs/screenshots/tutorial/inventory-waste.png) |
 | **Transfers** | Move stock between branches | ![Transfers](docs/screenshots/tutorial/inventory-transfers.png) |
 
+- A supplier invoice stays on record once you record a payment against it, including a partial payment. The payment remains linked to the invoice for reconciliation.
 - **Recipes** link menu items to ingredients. Stock deducts at checkout, and a shortfall never blocks a sale.
 - **Transfers** need at least two branches. Choose the ingredient, quantity and destination, then **Transfer**. The source is reduced first-in-first-out, and the destination gets a new batch at the same cost.
 
@@ -216,7 +227,9 @@ Open **Accounting**. It has eight tabs.
 
 ## 10. Reports, exports and scheduled emails
 
-**Reports** has 18 reports: daily sales, sales by item, peak hours, food cost and margins, retention, tax, waste and more. Print them, or export as **Excel**, **PDF** or **CSV** (needs the `data.export` permission).
+**Reports** has 19 reports: daily sales, an **All bills (day book)**, sales by item, peak hours, food cost and margins, retention, tax, waste and more. Pick Today, Yesterday, Last 7 days, This month or any dates. Every sales report ends with a totals line. Print them, or export as **Excel**, **PDF** or **CSV** (needs the `data.export` permission).
+
+**See every bill of a day:** open **Daily sales** and click the day, or choose **All bills (day book)**. Click a bill to open it. An admin can use their password to delete an eligible finished bill, such as an unpaid cancellation. A recorded payment or refund, a gateway operation awaiting confirmation or review, a successful gateway operation, or a VERI*FACTU record protects the bill. Use **Refund** to correct a paid sale. In **Orders → History**, a protected bill keeps the entire selection in history if you try to delete several at once.
 
 ![Reports](docs/screenshots/tutorial/reports.png)
 
@@ -237,7 +250,7 @@ Reports go out at 06:00 branch time: daily covers yesterday, weekly goes on Mond
 | **Marketing** | Coupons, happy-hour pricing and email campaigns. |
 | **Delivery** | Delivery zones and the pickup-to-delivered status of delivery orders. |
 | **Operations** | Documents (SOPs, contracts, recipes) and equipment maintenance. Use **Attach file** to add PDFs, images, text, Word or Excel files (5 MB each, up to 10 per document). |
-| **Settings → Audit log** | Who did what, and when. |
+| **Settings → Audit log** | Who did what, and when. Export it to Excel, PDF or CSV. Entries are permanent: nobody, admins included, can edit or delete them. |
 | **Settings → Backup** | Schedule and restore backups. Test a restore before you need one. |
 | **Settings → Security** | Two-factor sign-in and recovery codes. |
 | **Settings → API keys, Webhooks** | Let other systems talk to OrderRestro. |
@@ -285,7 +298,17 @@ OrderRestro has a REST API (`/api/v1`, docs at `/api/docs`), API keys, webhooks 
 
 ## Backups
 
-Everything lives in your Postgres volume. Use **Settings → Backup** for scheduled backups, and test a restore before you need one.
+Open **Settings → Backup** to download a copy of the database and uploads, or connect an S3-compatible bucket for automatic backups. On a shared server, one schedule covers all restaurants.
+
+Once the bucket is connected, choose **Edit schedule**. For example, select **Weekly**, **Sunday**, **03:00**, **America/Sao_Paulo**, and **4 copies**. Choose **Save schedule** to see the next run in that time zone.
+
+See the [schedule editor](docs/screenshots/backup-schedule-en.png) and the [saved weekly schedule](docs/screenshots/backup-schedule-saved-en.png).
+
+You can also run backups daily, monthly, or every few days. If you choose the 31st, shorter months use their last day. Existing interval schedules keep working. Test a restore on a separate installation before you need one.
+
+Restoring a verified backup from an earlier version also restores that version’s database schema. Before reporting success, the restore reinstates the rules that protect financial history. The normal startup migration can safely apply those rules again.
+
+If your backup predates the offline sync conflict tables, restore it into an empty database, then start the current version to run its migrations. An in-place restore can leave the newer `sync_conflicts` table behind and stop the next startup with “relation already exists.” Keep the original database until you have verified the restored installation.
 
 Questions or bugs: [open an issue](https://github.com/Raktim94/nodedr-restaurant-pos/issues).
 

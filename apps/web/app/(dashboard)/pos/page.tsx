@@ -1,13 +1,14 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
 import { ChevronLeft, MonitorSmartphone, ShoppingCart } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { StatusNote, useNoteToast } from "@/components/ui/status-note";
 import { publishDisplay } from "@/lib/customer-display";
 import { BranchNotice } from "@/components/layout/branch-notice";
 import { CartPanel, type DeliveryDetails, type PosOrderType } from "@/components/pos/cart-panel";
-import { cartLineKey, portionText, type CartLine, type Portion } from "@/components/pos/cart-line";
+import { cartLineKey, cartLineName, type CartLine, type Portion } from "@/components/pos/cart-line";
 import { clearDraft, switchTableDraft, type Drafts } from "@/lib/pos-drafts";
 import { CheckoutPanel } from "@/components/pos/checkout-panel";
 import { KitchenProgressWidget } from "@/components/pos/kitchen-progress-widget";
@@ -16,7 +17,14 @@ import { PosTablePicker } from "@/components/pos/pos-table-picker";
 import { ProductGrid } from "@/components/pos/product-grid";
 import { Card } from "@/components/ui/card";
 import { useBranch } from "@/hooks/use-branch";
-import type { MenuItem } from "@/hooks/use-menu";
+import { useDisplaySettings } from "@/hooks/use-settings";
+import { useMenuItems, type MenuItem } from "@/hooks/use-menu";
+import { toInclusivePrice } from "@/lib/pricing-preview";
+import { findItemByCode, pushKey, SCAN_MAX_GAP_MS, type ScanBuffer } from "@/lib/pos-scan";
+import { useMenuPauseLabels } from "@/hooks/use-menu-pauses";
+import { withReportedPauses } from "@/lib/menu-pauses";
+import { useQueryClient } from "@tanstack/react-query";
+import { useI18n } from "@/lib/i18n/context";
 import {
   useAddOrderItems,
   useCreateOrder,
@@ -25,8 +33,8 @@ import {
   type OpenOrder,
 } from "@/hooks/use-orders";
 import { useFloors, type RestaurantTable } from "@/hooks/use-tables";
+import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api";
-import { formatCurrency } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 export default function PosPage() {
@@ -38,7 +46,15 @@ export default function PosPage() {
 }
 
 function PosPageInner() {
+  const fmt = useStaffFormat();
   const { branchId, isLoading: branchLoading } = useBranch();
+  const menu = useMenuItems(branchId);
+  const queryClient = useQueryClient();
+  const { t: translate, t } = useI18n();
+  const allItems = menu.data;
+  const { data: settings } = useDisplaySettings(branchId);
+  const pauseLabels = useMenuPauseLabels(allItems, settings?.restaurant.timezone);
+  const taxMode = settings?.branch.taxMode ?? "INCLUSIVE";
   const { note, clear: clearNote, toast } = useNoteToast();
   const floorsQuery = useFloors(branchId);
   const floors = floorsQuery.data;
@@ -64,6 +80,8 @@ function PosPageInner() {
   const [pickerItem, setPickerItem] = useState<MenuItem | null>(null);
   const [activeOrder, setActiveOrder] = useState<CreatedOrder | null>(null);
   const [activeCustomer, setActiveCustomer] = useState<OpenOrder["customer"]>(null);
+  // True right after "Send to kitchen" so the return actions can say what just happened.
+  const [justSent, setJustSent] = useState(false);
   // /pos?tableId=... can change while this page stays mounted.
   const [seenPreselected, setSeenPreselected] = useState(preselectedTableId);
   if (preselectedTableId !== seenPreselected) {
@@ -86,7 +104,7 @@ function PosPageInner() {
         : {
             kind: "cart",
             lines: lines.map((l) => ({
-              name: l.modifierLabel ? `${l.name} (${l.modifierLabel})` : l.name,
+              name: l.modifierLabel ? `${cartLineName(l)} (${l.modifierLabel})` : cartLineName(l),
               quantity: l.quantity,
               total: l.unitPrice * l.quantity,
             })),
@@ -129,15 +147,60 @@ function PosPageInner() {
   };
 
   const handleSelect = (item: MenuItem) => {
+    const pause = pauseLabels.get(item.id);
+    if (pause) {
+      toast.warning(`${item.name} · ${pause}`);
+      return;
+    }
     if (item.modifierGroups.length > 0 || item.halfPrice != null) {
       setPickerItem(item);
       return;
     }
-    addLine(item.id, item.name, Number(item.price), [], "");
+    addLine(
+      item.id,
+      item.name,
+      toInclusivePrice(Number(item.price), Number(item.taxRatePercent ?? 0), taxMode),
+      [],
+      "",
+    );
   };
 
+  // Keyboard-wedge barcode scanner: it types the code as a fast burst + Enter. Listen anywhere on the page except
+  // inside a text field (the search box handles its own Enter), look the code up across all categories and add it.
+  const scanRef = useRef({ buf: { text: "", last: 0 } as ScanBuffer, items: allItems, select: handleSelect, toast });
+  useEffect(() => {
+    scanRef.current.items = allItems;
+    scanRef.current.select = handleSelect;
+    scanRef.current.toast = toast;
+  });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+      const r = scanRef.current;
+      // While a scanner burst is in progress, swallow printable keys (including
+      // space). Otherwise each space in a code like "COLA 500" activates the
+      // focused menu tile before the scanned item is added.
+      const inBurst =
+        r.buf.last !== 0 &&
+        e.timeStamp - r.buf.last <= SCAN_MAX_GAP_MS &&
+        e.key.length === 1;
+      const { buf, code } = pushKey(r.buf, e.key, e.timeStamp);
+      r.buf = buf;
+      if (inBurst) e.preventDefault();
+      if (!code) return;
+      e.preventDefault();
+      const item = findItemByCode(r.items, code);
+      if (item) r.select(item);
+      else r.toast.error(translate("No menu item with barcode {code}. Add the barcode to the item or its stock ingredient.", { code }));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [translate]);
+
   const handleModifierConfirm = (modifierIds: string[], modifierLabel: string, portion?: Portion) => {
-    if (!pickerItem) return;
+    if (!pickerItem || pauseLabels.has(pickerItem.id)) return;
     const modifierTotal = modifierIds.reduce((sum, id) => {
       const mod = pickerItem.modifierGroups
         .flatMap((g) => g.modifierGroup.modifiers)
@@ -149,8 +212,12 @@ function PosPageInner() {
       (portion?.kind === "HALF" ? Number(pickerItem.halfPrice) : Number(pickerItem.price));
     addLine(
       pickerItem.id,
-      portion ? `${pickerItem.name} (${portionText(portion)})` : pickerItem.name,
-      base + modifierTotal,
+      pickerItem.name,
+      toInclusivePrice(
+        base + modifierTotal,
+        Number(pickerItem.taxRatePercent ?? 0),
+        taxMode,
+      ),
       modifierIds,
       modifierLabel,
       portion,
@@ -167,8 +234,22 @@ function PosPageInner() {
 
   const removeLine = (key: string) => setLines((prev) => prev.filter((l) => l.key !== key));
 
+  const handleOrderError = (err: unknown, fallback: string) => {
+    if (err instanceof ApiError && err.code === "ITEM_UNAVAILABLE") {
+      if (err.pausedItems.length) {
+        queryClient.setQueriesData<MenuItem[]>({ queryKey: ["menu", "items", branchId] },
+          (items) => items && withReportedPauses(items, err.pausedItems));
+        void menu.refetch();
+        toast.warning(t("menu.removePaused"));
+        return;
+      }
+      void menu.refetch();
+    }
+    toast.error(err instanceof ApiError ? err.message : fallback);
+  };
+
   const handleSubmit = () => {
-    if (checkingTable) return;
+    if (checkingTable || lines.some((line) => pauseLabels.has(line.menuItemId))) return;
     const sentTableId = tableId;
     const items = lines.map((l) => ({
       menuItemId: l.menuItemId,
@@ -191,9 +272,11 @@ function PosPageInner() {
             setDrafts((d) => clearDraft(d, sentTableId));
             setActiveCustomer(existingOrder.customer);
             setActiveOrder(order);
-            toast.success(`Added to order #${order.orderNumber} — sent to kitchen`);
+            setJustSent(true);
+            setCartOpen(true);
+            toast.success(translate("Added to order #{orderNumber} — sent to kitchen", { orderNumber: order.orderNumber }));
           },
-          onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not add items"),
+          onError: (err) => handleOrderError(err, translate("Could not add items")),
         },
       );
       return;
@@ -214,10 +297,11 @@ function PosPageInner() {
           setDrafts((d) => clearDraft(d, sentTableId));
           setActiveCustomer(null);
           setActiveOrder(order);
+          setJustSent(true);
           setCartOpen(true);
-          toast.success(`Order #${order.orderNumber} sent to kitchen`);
+          toast.success(translate("Order #{orderNumber} sent to kitchen", { orderNumber: order.orderNumber }));
         },
-        onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not create order"),
+        onError: (err) => handleOrderError(err, translate("Could not create order")),
       },
     );
   };
@@ -226,11 +310,27 @@ function PosPageInner() {
     if (existingOrder) {
       setActiveCustomer(existingOrder.customer);
       setActiveOrder(existingOrder);
+      setJustSent(false);
       setCartOpen(true);
     }
   };
 
+  // "Back to this table": leave the payment view but stay on the same table and
+  // the same bill, so staff can add another round now or take payment later.
+  // The sent items are already on the bill; unsent drafts of other tables stay.
+  const backToTable = () => {
+    if (!activeOrder || orderType !== "DINE_IN" || !tableId) return;
+    const billId = activeOrder.id;
+    setActiveOrder(null);
+    setActiveCustomer(null);
+    setJustSent(false);
+    setLines([]);
+    setCartOpen(false);
+    setSelectedBillId(billId);
+  };
+
   const resetForNewOrder = () => {
+    setJustSent(false);
     setActiveOrder(null);
     setCartOpen(false);
     // The sent cart is gone; other tables' unsent drafts stay.
@@ -253,6 +353,10 @@ function PosPageInner() {
   // mid-flow (tableId set, or viewing/paying an order) skip straight past
   // it, same as arriving here from the Tables page's own "New order" link
   // (?tableId=... pre-fills this and never shows the picker).
+  const tableLabel = (() => {
+    const t = tables.find((x) => x.id === tableId);
+    return t ? (t.name ?? translate("Table {number}", { number: t.number })) : "";
+  })();
   const showTablePicker = orderType === "DINE_IN" && !tableId && !activeOrder;
 
   return (
@@ -267,10 +371,10 @@ function PosPageInner() {
           target="_blank"
           rel="noreferrer"
           className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-          title="Opens the customer-facing screen in a new window — drag it to the second monitor"
+          title={translate("Opens the customer-facing screen in a new window — drag it to the second monitor")}
         >
           <MonitorSmartphone className="h-3.5 w-3.5" />
-          Customer display
+          {translate("Customer display")}
         </a>
       </div>
 
@@ -289,9 +393,17 @@ function PosPageInner() {
         </Card>
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-1 gap-6 overflow-hidden lg:grid-cols-[1fr_360px]">
-          <Card className="min-h-0 overflow-hidden p-3 sm:p-5">
-            <ProductGrid branchId={branchId} onSelect={handleSelect} />
-          </Card>
+          <div className="flex min-h-0 flex-col gap-3">
+            <Card className="min-h-0 flex-1 overflow-hidden p-3 sm:p-5">
+              <ProductGrid
+                branchId={branchId}
+                onSelect={handleSelect}
+                menu={menu}
+                pauseLabels={pauseLabels}
+                taxMode={taxMode}
+              />
+            </Card>
+          </div>
 
           <Card
             className={cn(
@@ -307,8 +419,35 @@ function PosPageInner() {
               className="mb-3 -ml-1 flex items-center gap-1 text-sm font-medium text-muted-foreground lg:hidden"
             >
               <ChevronLeft className="h-4 w-4" />
-              Back to menu
+              {translate("Back to menu")}
             </button>
+            {activeOrder && (
+              <div
+                role="status"
+                className="mb-3 flex flex-col gap-2 rounded-xl border border-success/30 bg-success/10 p-3"
+              >
+                <p className="text-sm font-medium text-foreground">
+                  {justSent ? translate("Order #{orderNumber} sent to kitchen", { orderNumber: activeOrder.orderNumber }) : translate("Bill #{orderNumber}", { orderNumber: activeOrder.orderNumber })}
+                  {orderType === "DINE_IN" && tableId && (
+                    <span className="font-normal text-muted-foreground"> · {tableLabel}</span>
+                  )}
+                </p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {orderType === "DINE_IN" && tableId && (
+                    <Button type="button" variant="outline" className="h-11" onClick={backToTable}>
+                      {translate("Back to this table")}
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    className={cn("h-11", !(orderType === "DINE_IN" && tableId) && "sm:col-span-2")}
+                    onClick={resetForNewOrder}
+                  >
+                    {translate("Back to POS menu")}
+                  </Button>
+                </div>
+              </div>
+            )}
             {activeOrder ? (
               <CheckoutPanel
                 order={activeOrder}
@@ -319,6 +458,7 @@ function PosPageInner() {
             ) : (
               <CartPanel
                 lines={lines}
+                pauseLabels={pauseLabels}
                 orderType={orderType}
                 onOrderTypeChange={setOrderType}
                 tables={tables}
@@ -340,6 +480,7 @@ function PosPageInner() {
                 scheduledFor={scheduledFor}
                 onScheduledForChange={setScheduledFor}
                 branchId={branchId}
+                taxMode={taxMode}
               />
             )}
           </Card>
@@ -356,14 +497,14 @@ function PosPageInner() {
           <span className="flex items-center gap-2 text-sm font-semibold">
             <ShoppingCart className="h-5 w-5" />
             {activeOrder
-              ? `Order #${activeOrder.orderNumber} — pay`
+              ? translate("Order #{orderNumber} — pay", { orderNumber: activeOrder.orderNumber })
               : lines.length > 0
-                ? `View cart · ${lines.reduce((n, l) => n + l.quantity, 0)} items`
-                : `Open bill #${existingOrder?.orderNumber} — view`}
+                ? translate("View cart · {reduce} items", { reduce: lines.reduce((n, l) => n + l.quantity, 0) })
+                : translate("Open bill #{orderNumber} — view", { orderNumber: (existingOrder?.orderNumber) ?? "" })}
           </span>
           {!activeOrder && lines.length > 0 && (
             <span className="text-sm font-semibold tabular-nums">
-              {formatCurrency(lines.reduce((s, l) => s + l.unitPrice * l.quantity, 0))}
+              {fmt.currency(lines.reduce((s, l) => s + l.unitPrice * l.quantity, 0))}
             </span>
           )}
         </button>
@@ -371,6 +512,7 @@ function PosPageInner() {
 
       <ModifierPickerDialog
         item={pickerItem}
+        pauseLabel={pickerItem ? pauseLabels.get(pickerItem.id) : undefined}
         open={!!pickerItem}
         onOpenChange={(open) => !open && setPickerItem(null)}
         onConfirm={handleModifierConfirm}

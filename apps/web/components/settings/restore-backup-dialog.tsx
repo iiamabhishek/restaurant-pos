@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -30,6 +32,8 @@ export function RestoreBackupDialog({
   backup: BackupEntry;
   onClose: () => void;
 }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const [confirmText, setConfirmText] = useState("");
   const restoreBackup = useRestoreBackup();
 
@@ -40,11 +44,11 @@ export function RestoreBackupDialog({
       { id: backup.id, dto: { confirm: CONFIRM_WORD } },
       {
         onSuccess: () => {
-          toast.success("Restore completed — database and uploads reverted to this backup");
+          toast.success(t("Restore completed — database and uploads reverted to this backup"));
           onClose();
         },
         onError: (err) =>
-          toast.error(err instanceof ApiError ? err.message : "Restore failed"),
+          toast.error(err instanceof ApiError ? err.message : t("Restore failed")),
       },
     );
   };
@@ -54,28 +58,22 @@ export function RestoreBackupDialog({
       <DialogContent className="sm:max-w-md">
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>Restore this backup?</DialogTitle>
+            <DialogTitle>{t("Restore this backup?")}</DialogTitle>
           </DialogHeader>
 
           <div className="flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <p>{t("This overwrites the entire database and uploaded files — for every restaurant on this instance — with the contents of the backup taken {toLocaleString}. This cannot be undone.", { toLocaleString: new Date(backup.createdAt).toLocaleString(fmt.localeTag) })}</p>
             <p>
-              This overwrites the entire database and uploaded files — for every
-              restaurant on this instance — with the contents of the backup taken{" "}
-              {new Date(backup.createdAt).toLocaleString()}. This cannot be undone.
-            </p>
-            <p>
-              Type <code className="rounded bg-background/50 px-1 font-mono">RESTORE</code>{" "}
-              to confirm.
-            </p>
+              {t("Type")} <code className="rounded bg-background/50 px-1 font-mono">RESTORE</code> {t("to confirm.")}</p>
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="restore-confirm">Confirmation</Label>
+            <Label htmlFor="restore-confirm">{t("Confirmation")}</Label>
             <Input
               id="restore-confirm"
               value={confirmText}
               onChange={(e) => setConfirmText(e.target.value)}
-              placeholder="RESTORE"
+              placeholder={t("RESTORE")}
               autoFocus
               autoComplete="off"
             />
@@ -88,14 +86,14 @@ export function RestoreBackupDialog({
               onClick={onClose}
               disabled={restoreBackup.isPending}
             >
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               type="submit"
               variant="destructive"
               disabled={confirmText !== CONFIRM_WORD || restoreBackup.isPending}
             >
-              {restoreBackup.isPending ? "Restoring…" : "Confirm restore"}
+              {restoreBackup.isPending ? t("Restoring…") : t("Confirm restore")}
             </Button>
           </DialogFooter>
         </form>

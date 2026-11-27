@@ -5,14 +5,14 @@ const CODES =
     " ",
   );
 
-export function countryOptions(): { code: string; name: string }[] {
+export function countryOptions(locale = "en"): { code: string; name: string }[] {
   let names: Intl.DisplayNames | null = null;
   try {
-    names = new Intl.DisplayNames(["en"], { type: "region" });
+    names = new Intl.DisplayNames([locale], { type: "region" });
   } catch {
     names = null;
   }
   return CODES.map((code) => ({ code, name: names?.of(code) ?? code })).sort((a, b) =>
-    a.name.localeCompare(b.name),
+    a.name.localeCompare(b.name, locale),
   );
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { Check, ChevronsUpDown, Store } from "lucide-react";
 import {
   DropdownMenu,
@@ -10,6 +11,7 @@ import {
 import { useBranch } from "@/hooks/use-branch";
 
 export function BranchSwitcher() {
+  const { t } = useI18n();
   const { branchId, branches, setBranchId } = useBranch();
   const current = branches.find((b) => b.id === branchId);
 
@@ -20,7 +22,7 @@ export function BranchSwitcher() {
       <DropdownMenuTrigger className="flex w-full items-center gap-2 rounded-xl border border-sidebar-border bg-sidebar px-3 py-2 text-left text-sm hover:bg-sidebar-accent/50">
         <Store className="h-4 w-4 shrink-0 text-muted-foreground" />
         <span className="flex-1 truncate font-medium text-sidebar-foreground">
-          {current?.name ?? "Select branch"}
+          {current?.name ?? t("Select branch")}
         </span>
         <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
       </DropdownMenuTrigger>

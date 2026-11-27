@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ export function AddReservationDialog({
   branchId: string | null;
   tables: RestaurantTable[];
 }) {
+  const { t: translate } = useI18n();
   const [open, setOpen] = useState(false);
   const [customerName, setCustomerName] = useState("");
   const [phone, setPhone] = useState("");
@@ -71,27 +73,27 @@ export function AddReservationDialog({
       },
       {
         onSuccess: () => {
-          toast.success(`Reservation added for ${customerName}`);
+          toast.success(translate("Reservation added for {customerName}", { customerName }));
           setOpen(false);
           reset();
         },
         onError: (err) =>
-          toast.error(err instanceof ApiError ? err.message : "Could not add reservation"),
+          toast.error(err instanceof ApiError ? err.message : translate("Could not add reservation")),
       },
     );
   };
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button size="sm">New reservation</Button>} />
+      <DialogTrigger render={<Button size="sm">{translate("New reservation")}</Button>} />
       <DialogContent className="sm:max-w-md">
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>New reservation</DialogTitle>
+            <DialogTitle>{translate("New reservation")}</DialogTitle>
           </DialogHeader>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="r-name">Customer name</Label>
+            <Label htmlFor="r-name">{translate("Customer name")}</Label>
             <Input
               id="r-name"
               value={customerName}
@@ -103,11 +105,11 @@ export function AddReservationDialog({
 
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-phone">Phone</Label>
+              <Label htmlFor="r-phone">{translate("Phone")}</Label>
               <Input id="r-phone" value={phone} onChange={(e) => setPhone(e.target.value)} />
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-guests">Guests</Label>
+              <Label htmlFor="r-guests">{translate("Guests")}</Label>
               <Input
                 id="r-guests"
                 type="number"
@@ -120,7 +122,7 @@ export function AddReservationDialog({
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="r-when">Date & time</Label>
+            <Label htmlFor="r-when">{translate("Date & time")}</Label>
             <Input
               id="r-when"
               type="datetime-local"
@@ -131,15 +133,15 @@ export function AddReservationDialog({
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label>Table (optional)</Label>
+            <Label>{translate("Table (optional)")}</Label>
             <Select value={tableId} onValueChange={(v) => setTableId(v ?? "")}>
               <SelectTrigger>
-                <SelectValue placeholder="No table assigned yet" />
+                <SelectValue placeholder={translate("No table assigned yet")} />
               </SelectTrigger>
               <SelectContent>
                 {tables.map((t) => (
                   <SelectItem key={t.id} value={t.id}>
-                    {t.name ?? `Table ${t.number}`}
+                    {t.name ?? translate("Table {number}", { number: t.number })}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -147,7 +149,7 @@ export function AddReservationDialog({
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="r-notes">Special requests</Label>
+            <Label htmlFor="r-notes">{translate("Special requests")}</Label>
             <Textarea
               id="r-notes"
               value={specialRequests}
@@ -158,7 +160,7 @@ export function AddReservationDialog({
 
           <DialogFooter>
             <Button type="submit" disabled={createReservation.isPending}>
-              {createReservation.isPending ? "Saving…" : "Save reservation"}
+              {createReservation.isPending ? translate("Saving…") : translate("Save reservation")}
             </Button>
           </DialogFooter>
         </form>

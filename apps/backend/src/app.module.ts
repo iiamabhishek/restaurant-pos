@@ -32,6 +32,7 @@ import { RestaurantsModule } from './modules/restaurants/restaurants.module';
 import { ReservationsModule } from './modules/reservations/reservations.module';
 import { WaitlistModule } from './modules/waitlist/waitlist.module';
 import { PublicModule } from './modules/public/public.module';
+import { NfcModule } from './modules/nfc/nfc.module';
 import { DownloadsModule } from './modules/downloads/downloads.module';
 import { CustomersModule } from './modules/customers/customers.module';
 import { GiftCardsModule } from './modules/gift-cards/gift-cards.module';
@@ -44,12 +45,18 @@ import { AuditModule } from './audit/audit.module';
 import { RolesModule } from './roles/roles.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PushModule } from './push/push.module';
+import { DevicesModule } from './devices/devices.module';
+import { DisplayModule } from './modules/display/display.module';
+import { PagingModule } from './modules/paging/paging.module';
+import { RatingsModule } from './modules/ratings/ratings.module';
+import { DemoModule } from './demo/demo.module';
 import { StandaloneModule } from './standalone/standalone.module';
 import { BackupModule } from './backup/backup.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { McpModule } from './mcp/mcp.module';
 import { SystemModule } from './system/system.module';
 import { VerifactuModule } from './modules/verifactu/verifactu.module';
+import { AiModule } from './ai/ai.module';
 
 @Module({
   imports: [
@@ -81,6 +88,7 @@ import { VerifactuModule } from './modules/verifactu/verifactu.module';
     ReservationsModule,
     WaitlistModule,
     PublicModule,
+    NfcModule,
     DownloadsModule,
     CustomersModule,
     GiftCardsModule,
@@ -88,6 +96,7 @@ import { VerifactuModule } from './modules/verifactu/verifactu.module';
     SettingsModule,
     SyncModule,
     VerifactuModule,
+    AiModule,
     UsersModule,
     PermissionsModule,
     AuditModule,
@@ -95,6 +104,11 @@ import { VerifactuModule } from './modules/verifactu/verifactu.module';
     NotificationsModule,
     PushModule,
     StandaloneModule,
+    DevicesModule,
+    DisplayModule,
+    PagingModule,
+    RatingsModule,
+    DemoModule,
     BackupModule,
     IntegrationsModule,
     McpModule,

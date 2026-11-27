@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { INTEGRATION_SCOPES, type IntegrationScope } from "@nodedr-restaurant/types";
@@ -24,6 +25,7 @@ export function CreateIntegrationKeyDialog({
   onClose: () => void;
   onCreated: (token: string) => void;
 }) {
+  const { t } = useI18n();
   const { branches } = useBranch();
   const [name, setName] = useState("");
   const [branchId, setBranchId] = useState<string>(ALL_LOCATIONS);
@@ -37,14 +39,14 @@ export function CreateIntegrationKeyDialog({
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (scopes.length === 0) {
-      toast.error("Select at least one permission this key should have");
+      toast.error(t("Select at least one permission this key should have"));
       return;
     }
     createKey.mutate(
       { name: name.trim(), branchId: branchId === ALL_LOCATIONS ? undefined : branchId, scopes },
       {
         onSuccess: (created) => onCreated(created.token),
-        onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not create API key"),
+        onError: (err) => toast.error(err instanceof ApiError ? err.message : t("Could not create API key")),
       },
     );
   };
@@ -54,35 +56,35 @@ export function CreateIntegrationKeyDialog({
       <DialogContent className="sm:max-w-md">
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>New integration API key</DialogTitle>
+            <DialogTitle>{t("New integration API key")}</DialogTitle>
           </DialogHeader>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="ik-name">Name</Label>
+            <Label htmlFor="ik-name">{t("Name")}</Label>
             <Input
               id="ik-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Our website ordering widget"
+              placeholder={t("e.g. Our website ordering widget")}
               required
               autoFocus
             />
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="ik-branch">Location</Label>
+            <Label htmlFor="ik-branch">{t("Location")}</Label>
             <Select value={branchId} onValueChange={(v) => setBranchId(v ?? ALL_LOCATIONS)}>
               <SelectTrigger id="ik-branch">
-                <SelectValue placeholder="All locations">
+                <SelectValue placeholder={t("All locations")}>
                   {(value: string | null) =>
                     !value || value === ALL_LOCATIONS
-                      ? "All locations"
-                      : (branches.find((b) => b.id === value)?.name ?? "All locations")
+                      ? t("All locations")
+                      : (branches.find((b) => b.id === value)?.name ?? t("All locations"))
                   }
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={ALL_LOCATIONS}>All locations</SelectItem>
+                <SelectItem value={ALL_LOCATIONS}>{t("All locations")}</SelectItem>
                 {branches.map((b) => (
                   <SelectItem key={b.id} value={b.id}>
                     {b.name}
@@ -91,13 +93,12 @@ export function CreateIntegrationKeyDialog({
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              Scope this key to one location, or leave it as all locations for a key a central booking widget can use
-              across every branch.
+              {t("Scope this key to one location, or leave it as all locations for a key a central booking widget can use across every branch.")}
             </p>
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label>Permissions</Label>
+            <Label>{t("Permissions")}</Label>
             <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
               {INTEGRATION_SCOPES.map((scope) => (
                 <label key={scope.key} className="flex items-start gap-2 text-sm text-foreground">
@@ -117,10 +118,10 @@ export function CreateIntegrationKeyDialog({
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={createKey.isPending}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button type="submit" disabled={createKey.isPending}>
-              {createKey.isPending ? "Creating…" : "Create key"}
+              {createKey.isPending ? t("Creating…") : t("Create key")}
             </Button>
           </DialogFooter>
         </form>

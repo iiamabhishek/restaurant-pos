@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import type { ReservationStatusDto } from "@nodedr-restaurant/types";
 import { Check, X, Users } from "lucide-react";
 import { useState } from "react";
@@ -39,6 +41,8 @@ const STATUS_FLOW: ReservationStatusDto[] = [
 ];
 
 export default function ReservationsPage() {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { branchId } = useBranch();
   const { data: reservations, isLoading } = useReservations(branchId);
   const { data: floors } = useFloors(branchId);
@@ -53,9 +57,9 @@ export default function ReservationsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-[32px] font-semibold tracking-tight text-foreground">
-            Reservations
+            {t("Reservations")}
           </h1>
-          <p className="text-sm text-muted-foreground">Upcoming bookings across all floors</p>
+          <p className="text-sm text-muted-foreground">{t("Upcoming bookings across all floors")}</p>
         </div>
         <AddReservationDialog branchId={branchId} tables={tables} />
       </div>
@@ -86,7 +90,7 @@ export default function ReservationsPage() {
                 : "border-border text-muted-foreground hover:bg-secondary",
             )}
           >
-            {label}
+            {t(label)}
           </button>
         ))}
       </div>
@@ -105,22 +109,20 @@ export default function ReservationsPage() {
                 type="button"
                 onClick={() => setSelected(r)}
                 className="flex flex-col text-left transition hover:opacity-80"
-                title="Manage booking"
+                title={t("Manage booking")}
               >
                 <span className="flex items-center gap-2 text-sm font-medium text-foreground">
                   {r.customerName}
                   <ChannelBadge channel={r.channel} />
                 </span>
                 <span className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Users className="h-3 w-3" />
-                  {r.guestCount} guests
-                  {r.table && <> · {r.table.name ?? `Table ${r.table.number}`}</>}
+                  <Users className="h-3 w-3" />{t("{guestCount} guests", { guestCount: r.guestCount })}{r.table && <> · {r.table.name ?? t("Table {number}", { number: r.table.number })}</>}
                   {r.phone && <> · {r.phone}</>}
                 </span>
               </button>
               <div className="flex items-center gap-3">
                 <span className="text-sm tabular-nums text-muted-foreground">
-                  {new Date(r.reservedAt).toLocaleString(undefined, {
+                  {new Date(r.reservedAt).toLocaleString(fmt.localeTag, {
                     month: "short",
                     day: "numeric",
                     hour: "numeric",
@@ -133,7 +135,7 @@ export default function ReservationsPage() {
                       variant="secondary"
                       size="icon-sm"
                       className="text-success hover:bg-success/10"
-                      title="Accept reservation"
+                      title={t("Accept reservation")}
                       onClick={() => updateStatus.mutate({ id: r.id, status: "CONFIRMED" })}
                     >
                       <Check className="h-4 w-4" />
@@ -142,7 +144,7 @@ export default function ReservationsPage() {
                       variant="secondary"
                       size="icon-sm"
                       className="text-destructive hover:bg-destructive/10"
-                      title="Reject reservation"
+                      title={t("Reject reservation")}
                       onClick={() => updateStatus.mutate({ id: r.id, status: "CANCELLED" })}
                     >
                       <X className="h-4 w-4" />
@@ -156,7 +158,7 @@ export default function ReservationsPage() {
                       STATUS_STYLES[r.status],
                     )}
                   >
-                    {r.status.replace("_", " ")}
+                    {fmt.code(r.status)}
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     {STATUS_FLOW.map((status) => (
@@ -165,7 +167,7 @@ export default function ReservationsPage() {
                         disabled={status === r.status}
                         onClick={() => updateStatus.mutate({ id: r.id, status })}
                       >
-                        {status.replace("_", " ")}
+                        {fmt.code(status)}
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>
@@ -175,9 +177,9 @@ export default function ReservationsPage() {
           ))
         ) : (
           <div className="flex flex-col items-center gap-2 py-16 text-center">
-            <p className="text-sm font-medium text-foreground">No reservations yet</p>
+            <p className="text-sm font-medium text-foreground">{t("No reservations yet")}</p>
             <p className="text-sm text-muted-foreground">
-              Add a booking to hold a table for a guest.
+              {t("Add a booking to hold a table for a guest.")}
             </p>
           </div>
         )}

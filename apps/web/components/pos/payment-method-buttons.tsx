@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import {
   Banknote,
   Building2,
@@ -29,13 +30,16 @@ export function PaymentMethodButtons<T extends string>({
   methods,
   value,
   onChange,
-  label = "Payment method",
+  label: providedLabel,
 }: {
   methods: readonly T[];
   value: T;
   onChange: (m: T) => void;
   label?: string;
 }) {
+  const { t } = useI18n();
+
+  const label = providedLabel ?? t("Payment method");
   return (
     <div
       className={cn("grid gap-2", methods.length > 4 ? "grid-cols-3" : "grid-cols-4")}
@@ -60,7 +64,7 @@ export function PaymentMethodButtons<T extends string>({
             )}
           >
             <Icon className="h-[18px] w-[18px]" />
-            {text}
+            {META[m] ? t(text) : text}
           </button>
         );
       })}

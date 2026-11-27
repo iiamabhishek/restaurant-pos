@@ -49,6 +49,7 @@ test("cents survive float arithmetic", () => {
 
 test("discount shows percentage and amount together", () => {
   const f = (n: number) => `Rs ${n.toFixed(2)}`;
+  assert.equal(discountSummary(12.5, 25, f, (n) => n.toLocaleString("pt-BR") + "%"), "12,5% (Rs 25.00)");
   assert.equal(discountSummary(10, 20, f), "10% (Rs 20.00)");
   assert.equal(discountSummary(12.5, 25, f), "12.50% (Rs 25.00)");
 });

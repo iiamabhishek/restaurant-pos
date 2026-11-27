@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -41,11 +42,12 @@ export function TableEditorDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useI18n();
   const isEdit = !!table;
   const [number, setNumber] = useState(table?.number ?? "");
   const [name, setName] = useState(table?.name ?? "");
   const [capacity, setCapacity] = useState(String(table?.capacity ?? 4));
-  const [shape, setShape] = useState<"square" | "round" | "rect">(table?.shape ?? "square");
+  const [shape, setShape] = useState<"square" | "round" | "rect" | "booth" | "counter" | "other">(table?.shape ?? "square");
   const [bulkMode, setBulkMode] = useState(false);
   const [bulkStart, setBulkStart] = useState("1");
   const [bulkCount, setBulkCount] = useState("5");
@@ -76,18 +78,18 @@ export function TableEditorDialog({
 
     if (!isEdit && bulkMode) {
       if (bulkNumbers.length === 0) {
-        toast.error("Enter a valid starting number and count");
+        toast.error(t("Enter a valid starting number and count"));
         return;
       }
       bulkCreateTables.mutate(
         { floorId, numbers: bulkNumbers, capacity: Number(capacity) || 1, shape },
         {
           onSuccess: () => {
-            toast.success(`${bulkNumbers.length} tables added`);
+            toast.success(t("{count} tables added", { count: bulkNumbers.length }));
             onOpenChange(false);
           },
           onError: (err) =>
-            toast.error(err instanceof ApiError ? err.message : "Could not add tables"),
+            toast.error(err instanceof ApiError ? err.message : t("Could not add tables")),
         },
       );
       return;
@@ -105,10 +107,10 @@ export function TableEditorDialog({
         { id: table.id, dto },
         {
           onSuccess: () => {
-            toast.success("Table updated");
+            toast.success(t("Table updated"));
             onOpenChange(false);
           },
-          onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not update table"),
+          onError: (err) => toast.error(err instanceof ApiError ? err.message : t("Could not update table")),
         },
       );
       return;
@@ -118,10 +120,10 @@ export function TableEditorDialog({
       { floorId, ...dto, posX: 20, posY: 20, width: 80, height: 80, rotation: 0 },
       {
         onSuccess: () => {
-          toast.success(`Table ${number} added`);
+          toast.success(t("Table {number} added", { number }));
           onOpenChange(false);
         },
-        onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not add table"),
+        onError: (err) => toast.error(err instanceof ApiError ? err.message : t("Could not add table")),
       },
     );
   };
@@ -137,13 +139,13 @@ export function TableEditorDialog({
       <DialogContent>
         <form onSubmit={onSubmit}>
           <DialogHeader>
-            <DialogTitle>{isEdit ? "Edit table" : bulkMode ? "Add multiple tables" : "New table"}</DialogTitle>
+            <DialogTitle>{isEdit ? t("Edit table") : bulkMode ? t("Add multiple tables") : t("New table")}</DialogTitle>
           </DialogHeader>
           <div className="flex flex-col gap-4 py-4">
             {!isEdit && (
               <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
                 <Label htmlFor="bulk-mode" className="text-sm font-normal">
-                  Add multiple tables at once
+                  {t("Add multiple tables at once")}
                 </Label>
                 <Switch id="bulk-mode" checked={bulkMode} onCheckedChange={setBulkMode} />
               </div>
@@ -152,7 +154,7 @@ export function TableEditorDialog({
             {!isEdit && bulkMode ? (
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="bulk-start">Starting number</Label>
+                  <Label htmlFor="bulk-start">{t("Starting number")}</Label>
                   <Input
                     id="bulk-start"
                     type="number"
@@ -164,7 +166,7 @@ export function TableEditorDialog({
                   />
                 </div>
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="bulk-count">How many</Label>
+                  <Label htmlFor="bulk-count">{t("How many")}</Label>
                   <Input
                     id="bulk-count"
                     type="number"
@@ -177,14 +179,14 @@ export function TableEditorDialog({
                 </div>
                 <p className="col-span-2 text-xs text-muted-foreground">
                   {bulkNumbers.length > 0
-                    ? `Will create tables numbered ${bulkNumbers[0]}–${bulkNumbers[bulkNumbers.length - 1]} (${bulkNumbers.length} tables).`
-                    : "Enter a starting number and count."}
+                    ? t("Will create tables numbered {value}–{value2} ({count} tables).", { value: bulkNumbers[0], value2: bulkNumbers[bulkNumbers.length - 1], count: bulkNumbers.length })
+                    : t("Enter a starting number and count.")}
                 </p>
               </div>
             ) : (
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="table-number">Number</Label>
+                  <Label htmlFor="table-number">{t("Number")}</Label>
                   <Input
                     id="table-number"
                     value={number}
@@ -195,7 +197,7 @@ export function TableEditorDialog({
                   />
                 </div>
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="table-capacity">Capacity</Label>
+                  <Label htmlFor="table-capacity">{t("Capacity")}</Label>
                   <Input
                     id="table-capacity"
                     type="number"
@@ -210,7 +212,7 @@ export function TableEditorDialog({
 
             {bulkMode && !isEdit && (
               <div className="flex flex-col gap-2">
-                <Label htmlFor="table-capacity-bulk">Capacity (each table)</Label>
+                <Label htmlFor="table-capacity-bulk">{t("Capacity (each table)")}</Label>
                 <Input
                   id="table-capacity-bulk"
                   type="number"
@@ -224,25 +226,28 @@ export function TableEditorDialog({
 
             {(!bulkMode || isEdit) && (
               <div className="flex flex-col gap-2">
-                <Label htmlFor="table-name">Label (optional)</Label>
+                <Label htmlFor="table-name">{t("Label (optional)")}</Label>
                 <Input
                   id="table-name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Window booth"
+                  placeholder={t("e.g. Window booth")}
                 />
               </div>
             )}
             <div className="flex flex-col gap-2">
-              <Label>Shape</Label>
+              <Label>{t("Shape")}</Label>
               <Select value={shape} onValueChange={(v) => setShape(v as typeof shape)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="square">Square</SelectItem>
-                  <SelectItem value="round">Round</SelectItem>
-                  <SelectItem value="rect">Rectangle</SelectItem>
+                  <SelectItem value="square">{t("Square")}</SelectItem>
+                  <SelectItem value="round">{t("Round")}</SelectItem>
+                  <SelectItem value="rect">{t("Rectangle")}</SelectItem>
+                  <SelectItem value="booth">{t("Booth")}</SelectItem>
+                  <SelectItem value="counter">{t("Counter / bar seat")}</SelectItem>
+                  <SelectItem value="other">{t("Other")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -250,12 +255,12 @@ export function TableEditorDialog({
           <DialogFooter>
             <Button type="submit" disabled={isPending}>
               {isPending
-                ? "Saving…"
+                ? t("Saving…")
                 : isEdit
-                  ? "Save changes"
+                  ? t("Save changes")
                   : bulkMode
-                    ? `Add ${bulkNumbers.length || ""} tables`
-                    : "Add table"}
+                    ? t("Add {value} tables", { value: bulkNumbers.length || "" })
+                    : t("Add table")}
             </Button>
           </DialogFooter>
         </form>

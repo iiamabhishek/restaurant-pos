@@ -1,10 +1,11 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Gift } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCustomerRewards } from "@/hooks/use-customers";
-import { formatCurrency } from "@/lib/format";
 
 const REASON: Record<string, string> = {
   REFERRAL_REFERRER: "Friend's first order",
@@ -14,6 +15,8 @@ const REASON: Record<string, string> = {
 };
 
 export function RewardsCard({ branchId, customerId }: { branchId: string | null; customerId: string }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data, isLoading, isError } = useCustomerRewards(branchId, customerId);
   if (isLoading) return <Skeleton className="h-40 rounded-2xl" />;
   if (isError || !data) return null;
@@ -21,35 +24,33 @@ export function RewardsCard({ branchId, customerId }: { branchId: string | null;
     <Card className="flex flex-col gap-3 p-5">
       <div className="flex items-center gap-2">
         <Gift className="h-4 w-4 text-muted-foreground" aria-hidden />
-        <h2 className="text-[18px] font-medium text-foreground">Points and rewards</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{t("Points and rewards")}</h2>
       </div>
       <p className="text-sm text-foreground">
-        <span className="text-2xl font-semibold tabular-nums">{data.points}</span> points
-        <span className="text-muted-foreground"> · worth {formatCurrency(data.balanceValue)}</span>
+        <span className="text-2xl font-semibold tabular-nums">{data.points}</span> {t("points")}
+        <span className="text-muted-foreground"> {t("· worth {formatCurrency}", { formatCurrency: fmt.currency(data.balanceValue) })}</span>
       </p>
       {data.rewards.length > 0 ? (
         <ul className="flex flex-wrap gap-2 text-xs">
           {data.rewards.map((r) => (
-            <li key={r.points} className="rounded-full border border-border px-3 py-1">
-              {r.points} pts = {formatCurrency(r.discount)} off
-            </li>
+            <li key={r.points} className="rounded-full border border-border px-3 py-1">{t("{points} pts = {formatCurrency} off", { points: r.points, formatCurrency: fmt.currency(r.discount) })}</li>
           ))}
         </ul>
       ) : (
-        <p className="text-xs text-muted-foreground">No rewards available yet.</p>
+        <p className="text-xs text-muted-foreground">{t("No rewards available yet.")}</p>
       )}
       {data.referralEnabled && data.code && (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-          <dt className="text-muted-foreground">Referral code</dt>
+          <dt className="text-muted-foreground">{t("Referral code")}</dt>
           <dd className="font-mono text-foreground">{data.code}</dd>
-          <dt className="text-muted-foreground">Friends invited / ordered</dt>
+          <dt className="text-muted-foreground">{t("Friends invited / ordered")}</dt>
           <dd className="text-foreground">{data.invited} / {data.rewarded}</dd>
-          <dt className="text-muted-foreground">Points from referrals</dt>
+          <dt className="text-muted-foreground">{t("Points from referrals")}</dt>
           <dd className="text-foreground">{data.pointsFromReferrals}</dd>
           {data.referredBy && (
             <>
-              <dt className="text-muted-foreground">Referred by a friend</dt>
-              <dd className="text-foreground">{data.referredBy === "REWARDED" ? "Reward paid" : "Waiting for first paid order"}</dd>
+              <dt className="text-muted-foreground">{t("Referred by a friend")}</dt>
+              <dd className="text-foreground">{data.referredBy === "REWARDED" ? t("Reward paid") : t("Waiting for first paid order")}</dd>
             </>
           )}
         </dl>
@@ -58,8 +59,8 @@ export function RewardsCard({ branchId, customerId }: { branchId: string | null;
         <ul className="flex max-h-40 flex-col divide-y divide-border overflow-y-auto rounded-lg border border-border text-xs">
           {data.history.map((h, i) => (
             <li key={i} className="flex items-center justify-between gap-2 p-2">
-              <span className="text-muted-foreground">{new Date(h.createdAt).toLocaleDateString()}</span>
-              <span className="min-w-0 flex-1 truncate text-foreground">{REASON[h.reason] ?? h.reason}</span>
+              <span className="text-muted-foreground">{new Date(h.createdAt).toLocaleDateString(fmt.localeTag)}</span>
+              <span className="min-w-0 flex-1 truncate text-foreground">{t(REASON[h.reason]) ?? h.reason}</span>
               <span className={h.delta > 0 ? "text-success" : "text-destructive"}>{h.delta > 0 ? "+" : ""}{h.delta}</span>
             </li>
           ))}

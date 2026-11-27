@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { type Translate, useI18n } from "@/lib/i18n/context";
 import { Clock, Trash2, X } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
@@ -10,16 +12,17 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { hasPermission, useCurrentUser } from "@/hooks/use-auth";
 import { useBranch } from "@/hooks/use-branch";
 import {
   useManagedOrders,
+  useReleaseOrder,
   type ManagedOrder,
   type OrderChannel,
   type OrderTab,
 } from "@/hooks/use-orders";
-import { formatCurrency } from "@/lib/format";
 import { openEntity } from "@/lib/entity-events";
 import { cn } from "@/lib/utils";
 
@@ -48,15 +51,16 @@ const chip = (on: boolean) =>
       : "border-border text-muted-foreground hover:bg-secondary",
   );
 
-function timeAgo(iso: string) {
+function timeAgo(t: Translate, iso: string) {
   const m = Math.round((Date.now() - new Date(iso).getTime()) / 60_000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
+  if (m < 1) return t("just now");
+  if (m < 60) return t("{m}m ago", { m });
   const h = Math.round(m / 60);
-  return h < 24 ? `${h}h ago` : `${Math.round(h / 24)}d ago`;
+  return h < 24 ? t("{h}h ago", { h }) : t("{round}d ago", { round: Math.round(h / 24) });
 }
 
 function OrdersView() {
+  const { t: translate } = useI18n();
   const { branchId } = useBranch();
   // Deep links from the dashboard (?tab=history&filter=online) pick the
   // starting view; after that the chips and tabs drive it as before.
@@ -70,7 +74,9 @@ function OrdersView() {
     return FILTERS.some((x) => x.key === f) ? (f as string) : "all";
   });
   const filter = FILTERS.find((f) => f.key === filterKey) ?? FILTERS[0];
-  const { data: orders, isLoading } = useManagedOrders(branchId, tab, filter.channel, filter.type);
+  // History: any day or range (not just the last week) plus bill / guest search.
+  const [hist, setHist] = useState({ from: "", to: "", q: "" });
+  const { data: orders, isLoading } = useManagedOrders(branchId, tab, filter.channel, filter.type, hist);
   const { data: pendingOrders } = useManagedOrders(branchId, "pending");
   const pendingCount = pendingOrders?.length ?? 0;
 
@@ -98,9 +104,9 @@ function OrdersView() {
   return (
     <div className="flex flex-col gap-5">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Orders</h1>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{translate("Orders")}</h1>
         <p className="text-sm text-muted-foreground">
-          Accept new online orders and manage everything in progress
+          {translate("Accept new online orders and manage everything in progress")}
         </p>
       </div>
 
@@ -112,9 +118,9 @@ function OrdersView() {
               setTab(t.key);
               setSelected(new Set());
             }} className={chip(tab === t.key)}>
-            {t.label}
+            {translate(t.label)}
             {t.key === "pending" && pendingCount > 0 && (
-              <span className="ml-2 rounded-full bg-destructive px-1.5 text-xs text-white">
+              <span className="ml-2 rounded-full bg-destructive px-1.5 text-xs text-destructive-foreground">
                 {pendingCount}
               </span>
             )}
@@ -130,16 +136,31 @@ function OrdersView() {
             onClick={() => setFilterKey(f.key)}
             className={cn(chip(filterKey === f.key), "py-1 text-xs")}
           >
-            {f.label}
+            {translate(f.label)}
           </button>
         ))}
       </div>
 
+      {tab === "history" && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Input aria-label={translate("History from date")} type="date" className="w-40" value={hist.from} onChange={(e) => setHist({ ...hist, from: e.target.value, to: hist.to || e.target.value })} />
+          <Input aria-label={translate("History to date")} type="date" className="w-40" value={hist.to} onChange={(e) => setHist({ ...hist, to: e.target.value, from: hist.from || e.target.value })} />
+          <Input aria-label={translate("Search bills")} placeholder={translate("Bill number or guest")} className="w-56" value={hist.q} onChange={(e) => setHist({ ...hist, q: e.target.value })} />
+          {(hist.from || hist.q) && (
+            <Button type="button" variant="ghost" size="sm" onClick={() => setHist({ from: "", to: "", q: "" })}>
+              {translate("Last 7 days")}
+            </Button>
+          )}
+          <span className="text-xs text-muted-foreground">
+            {hist.from ? translate("{value} bills", { value: orders?.length ?? 0 }) : translate("Showing the last 7 days")}
+            {orders && orders.length >= 500 ? translate(" (first 500 — narrow the dates)") : ""}
+          </span>
+        </div>
+      )}
+
       {selectable && finished.length > 0 && (
         <label className="flex w-fit cursor-pointer items-center gap-2 text-sm text-muted-foreground">
-          <Checkbox checked={allSelected} onCheckedChange={toggleAll} aria-label="Select all transactions" />
-          Select all {finished.length}
-        </label>
+          <Checkbox checked={allSelected} onCheckedChange={toggleAll} aria-label={translate("Select all transactions")} />{translate("Select all {count}", { count: finished.length })}</label>
       )}
 
       <Card className="flex flex-col divide-y divide-border p-2">
@@ -162,10 +183,10 @@ function OrdersView() {
         ) : (
           <div className="flex flex-col items-center gap-1 py-16 text-center">
             <p className="text-sm font-medium text-foreground">
-              {tab === "pending" ? "No orders waiting for you" : "No orders here"}
+              {tab === "pending" ? translate("No orders waiting for you") : translate("No orders here")}
             </p>
             <p className="text-sm text-muted-foreground">
-              New online orders appear here with a sound alert.
+              {translate("New online orders appear here with a sound alert.")}
             </p>
           </div>
         )}
@@ -185,9 +206,7 @@ function OrdersView() {
             visibleSelected.length > 0 && "pointer-events-auto",
           )}
         >
-          <span className="text-sm font-medium tabular-nums text-foreground" aria-live="polite">
-            {visibleSelected.length} selected
-          </span>
+          <span className="text-sm font-medium tabular-nums text-foreground" aria-live="polite">{translate("{count} selected", { count: visibleSelected.length })}</span>
           <Button
             type="button"
             variant="ghost"
@@ -195,7 +214,7 @@ function OrdersView() {
             tabIndex={visibleSelected.length > 0 ? 0 : -1}
             onClick={() => setSelected(new Set())}
           >
-            <X className="h-4 w-4" aria-hidden /> Clear
+            <X className="h-4 w-4" aria-hidden /> {translate("Clear")}
           </Button>
           <Button
             type="button"
@@ -204,7 +223,7 @@ function OrdersView() {
             tabIndex={visibleSelected.length > 0 ? 0 : -1}
             onClick={() => setConfirmOpen(true)}
           >
-            <Trash2 className="h-4 w-4" aria-hidden /> Delete
+            <Trash2 className="h-4 w-4" aria-hidden /> {translate("Delete")}
           </Button>
         </div>
       </div>
@@ -231,9 +250,13 @@ function OrderRow({
   selected: boolean;
   onToggle: () => void;
 }) {
-  const name = order.guestName ?? order.customer?.name ?? "Walk-in guest";
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
+  const name = order.guestName ?? order.customer?.name ?? t("Walk-in guest");
   const summary = order.items.map((i) => `${i.quantity}× ${i.nameSnapshot}`).join(", ");
   const rejected = order.acceptance === "REJECTED";
+  const { branchId } = useBranch();
+  const release = useReleaseOrder(branchId);
   return (
     <div
       className={cn(
@@ -246,46 +269,71 @@ function OrderRow({
           <Checkbox
             checked={selected}
             onCheckedChange={onToggle}
-            aria-label={`Select transaction #${order.orderNumber}`}
+            aria-label={t("Select transaction #{orderNumber}", { orderNumber: order.orderNumber })}
           />
         </div>
       )}
-    <button
-      type="button"
-      onClick={() => openEntity("Order", order.id)}
-      className="flex flex-1 items-start justify-between gap-4 rounded-lg px-4 py-3 text-left transition hover:bg-secondary/50"
-    >
-      <div className="flex min-w-0 flex-col gap-1">
+    <div className="flex flex-1 items-start justify-between gap-4 rounded-lg px-4 py-3 transition hover:bg-secondary/50">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => openEntity("Order", order.id)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            openEntity("Order", order.id);
+          }
+        }}
+        className="flex min-w-0 flex-1 cursor-pointer flex-col gap-1 text-left"
+      >
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold text-foreground">#{order.orderNumber}</span>
           <span className="text-sm text-foreground">{name}</span>
           <ChannelBadge channel={order.channel} />
           <TypeBadge type={order.type} />
           {order.acceptance === "PENDING" && (
-            <Badge className="font-normal">Needs action</Badge>
+            <Badge className="font-normal">{t("Needs action")}</Badge>
           )}
-          {rejected && <Badge variant="secondary" className="font-normal">Rejected</Badge>}
+          {order.status === "OPEN" && order.payIntent === "CASH" && (
+            <Badge variant="outline" className="border-warning font-normal text-warning">{t("Cash due at register")}</Badge>
+          )}
+          {order.status === "OPEN" && order.heldForPayment && (
+            <>
+              <Badge variant="outline" className="border-warning font-normal text-warning">{t("Waiting for online payment")}</Badge>
+            </>
+          )}
+          {rejected && <Badge variant="secondary" className="font-normal">{t("Rejected")}</Badge>}
           {!rejected && order.status === "CANCELLED" && (
-            <Badge variant="secondary" className="font-normal">Cancelled</Badge>
+            <Badge variant="secondary" className="font-normal">{t("Cancelled")}</Badge>
           )}
         </div>
         <span className="truncate text-xs text-muted-foreground">{summary}</span>
         {order.type === "DELIVERY" && order.deliveryAddress && (
           <span className="truncate text-xs text-muted-foreground">
             📍 {order.deliveryAddress}
-            {order.deliveryLat != null ? " · location shared" : ""}
+            {order.deliveryLat != null ? t(" · location shared") : ""}
           </span>
         )}
       </div>
+      </div>
       <div className="flex shrink-0 flex-col items-end gap-1">
+        {order.status === "OPEN" && order.heldForPayment && (
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={release.isPending}
+            onClick={() => release.mutate(order.id)}
+          >
+            {t("Send to kitchen anyway")}
+          </Button>
+        )}
         <span className="text-sm font-medium tabular-nums text-foreground">
-          {formatCurrency(order.totalAmount)}
+          {fmt.currency(order.totalAmount)}
         </span>
         <span className="flex items-center gap-1 text-xs text-muted-foreground">
-          <Clock className="h-3 w-3" /> {timeAgo(order.createdAt)}
+          <Clock className="h-3 w-3" /> {timeAgo(t, order.createdAt)}
         </span>
       </div>
-    </button>
     </div>
   );
 }

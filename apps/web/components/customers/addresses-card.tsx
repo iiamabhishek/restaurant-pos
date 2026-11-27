@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { formatCustomerAddress } from "@nodedr-restaurant/types";
 import { MapPin, Pencil, Plus, Star, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -44,27 +45,28 @@ export function AddressesCard({
   customerId: string;
   addresses: CustomerAddress[];
 }) {
+  const { t } = useI18n();
   const [editing, setEditing] = useState<CustomerAddress | "new" | null>(null);
   const update = useUpdateAddress(branchId, customerId);
   const remove = useDeleteAddress(branchId, customerId);
   const { note, clear, toast } = useNoteToast();
 
   const fail = (err: unknown) =>
-    toast.error(err instanceof ApiError ? err.message : "Could not save the address");
+    toast.error(err instanceof ApiError ? err.message : t("Could not save the address"));
 
   return (
     <Card className="flex flex-col gap-3 p-5">
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-[18px] font-medium text-foreground">Delivery addresses</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{t("Delivery addresses")}</h2>
         <Button size="sm" variant="outline" onClick={() => setEditing("new")}>
           <Plus className="h-3.5 w-3.5" />
-          Add address
+          {t("Add address")}
         </Button>
       </div>
       <StatusNote note={note} onClear={clear} />
       {addresses.length === 0 ? (
         <p className="py-4 text-sm text-muted-foreground">
-          No saved addresses yet. Add one to pick it quickly on delivery orders.
+          {t("No saved addresses yet. Add one to pick it quickly on delivery orders.")}
         </p>
       ) : (
         <ul className="flex flex-col divide-y divide-border">
@@ -74,15 +76,15 @@ export function AddressesCard({
                 <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
                 <div className="min-w-0 text-sm">
                   <p className="flex flex-wrap items-center gap-2 font-medium text-foreground">
-                    {a.label || "Address"}
-                    {a.isDefault && <Badge variant="secondary">Default</Badge>}
+                    {a.label || t("Address")}
+                    {a.isDefault && <Badge variant="secondary">{t("Default")}</Badge>}
                   </p>
                   <p className="[overflow-wrap:anywhere] text-muted-foreground">
                     {formatCustomerAddress(a)}
                     {a.pincode ? ` – ${a.pincode}` : ""}
                   </p>
                   {a.instructions && (
-                    <p className="text-xs text-muted-foreground">Note: {a.instructions}</p>
+                    <p className="text-xs text-muted-foreground">{t("Note: {instructions}", { instructions: a.instructions })}</p>
                   )}
                 </div>
               </div>
@@ -92,8 +94,8 @@ export function AddressesCard({
                     variant="ghost"
                     size="icon"
                     className="h-8 w-8"
-                    aria-label="Make default address"
-                    title="Make default"
+                    aria-label={t("Make default address")}
+                    title={t("Make default")}
                     disabled={update.isPending}
                     onClick={() =>
                       update.mutate({ id: a.id, dto: { isDefault: true } }, { onError: fail })
@@ -106,7 +108,7 @@ export function AddressesCard({
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8"
-                  aria-label="Edit address"
+                  aria-label={t("Edit address")}
                   onClick={() => setEditing(a)}
                 >
                   <Pencil className="h-4 w-4" />
@@ -115,12 +117,12 @@ export function AddressesCard({
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                  aria-label="Delete address"
+                  aria-label={t("Delete address")}
                   disabled={remove.isPending}
                   onClick={() => {
-                    if (!confirm("Delete this address? Past orders keep the address they were sent to.")) return;
+                    if (!confirm(t("Delete this address? Past orders keep the address they were sent to."))) return;
                     remove.mutate(a.id, {
-                      onSuccess: () => toast.success("Address deleted"),
+                      onSuccess: () => toast.success(t("Address deleted")),
                       onError: fail,
                     });
                   }}
@@ -156,6 +158,7 @@ function AddressDialog({
   address: CustomerAddress | null;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   const add = useAddAddress(branchId, customerId);
   const update = useUpdateAddress(branchId, customerId);
   const { note, clear, toast } = useNoteToast();
@@ -187,7 +190,7 @@ function AddressDialog({
       // The list behind the dialog shows the saved address; errors stay here.
       onSuccess: onClose,
       onError: (err: unknown) =>
-        toast.error(err instanceof ApiError ? err.message : "Could not save the address"),
+        toast.error(err instanceof ApiError ? err.message : t("Could not save the address")),
     };
     if (address) update.mutate({ id: address.id, dto }, opts);
     else add.mutate(dto, opts);
@@ -197,52 +200,52 @@ function AddressDialog({
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{address ? "Edit address" : "Add address"}</DialogTitle>
+          <DialogTitle>{address ? t("Edit address") : t("Add address")}</DialogTitle>
         </DialogHeader>
         <form onSubmit={submit} className="flex flex-col gap-3">
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="a-label">Label</Label>
-              <Input id="a-label" value={f.label} onChange={set("label")} placeholder="Home, Office" maxLength={40} />
+              <Label htmlFor="a-label">{t("Label")}</Label>
+              <Input id="a-label" value={f.label} onChange={set("label")} placeholder={t("Home, Office")} maxLength={40} />
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="a-pin">PIN / postal code</Label>
+              <Label htmlFor="a-pin">{t("PIN / postal code")}</Label>
               <Input id="a-pin" value={f.pincode} onChange={set("pincode")} inputMode="numeric" />
             </div>
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="a-line1">House / flat / building *</Label>
+            <Label htmlFor="a-line1">{t("House / flat / building *")}</Label>
             <Input id="a-line1" value={f.line1} onChange={set("line1")} required maxLength={200} />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="a-street">Street / locality</Label>
+            <Label htmlFor="a-street">{t("Street / locality")}</Label>
             <Input id="a-street" value={f.street} onChange={set("street")} maxLength={200} />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="a-landmark">Landmark</Label>
+            <Label htmlFor="a-landmark">{t("Landmark")}</Label>
             <Input id="a-landmark" value={f.landmark} onChange={set("landmark")} maxLength={200} />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="a-city">City</Label>
+              <Label htmlFor="a-city">{t("City")}</Label>
               <Input id="a-city" value={f.city} onChange={set("city")} maxLength={100} />
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="a-state">State</Label>
+              <Label htmlFor="a-state">{t("State")}</Label>
               <Input id="a-state" value={f.state} onChange={set("state")} maxLength={100} />
             </div>
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="a-notes">Delivery instructions</Label>
+            <Label htmlFor="a-notes">{t("Delivery instructions")}</Label>
             <Input id="a-notes" value={f.instructions} onChange={set("instructions")} maxLength={300} />
           </div>
           <StatusNote note={note} onClear={clear} />
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button type="submit" disabled={pending || !f.line1.trim()}>
-              {pending ? "Saving…" : "Save address"}
+              {pending ? t("Saving…") : t("Save address")}
             </Button>
           </DialogFooter>
         </form>

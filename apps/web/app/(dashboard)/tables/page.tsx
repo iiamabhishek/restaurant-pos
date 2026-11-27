@@ -1,7 +1,11 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { LayoutGrid, Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { CreateTablesDialog, ManageTablesDialog } from "@/components/tables/bulk-tables-dialogs";
+import { GuestCodesPanel } from "@/components/tables/guest-codes-panel";
+import { LayoutsBar } from "@/components/tables/layouts-bar";
 import { AddFloorDialog } from "@/components/tables/add-floor-dialog";
 import { EditableTableTile } from "@/components/tables/editable-table-tile";
 import { RenameFloorDialog } from "@/components/tables/rename-floor-dialog";
@@ -20,16 +24,19 @@ import { useBranch } from "@/hooks/use-branch";
 import { useFloors, type RestaurantTable } from "@/hooks/use-tables";
 
 export default function TablesPage() {
+  const { t: translate } = useI18n();
   const { branchId } = useBranch();
   const { data: me } = useCurrentUser();
   // tables.view is read-only (status updates stay available); layout edits need tables.manage.
   const canManage = hasPermission(me?.user, "tables.manage");
-  const floorsQuery = useFloors(branchId);
+  const [wantEdit, setWantEdit] = useState(false);
+  const floorsQuery = useFloors(branchId, wantEdit && canManage);
   const { data: floors } = floorsQuery;
   const { isLoading: branchLoading } = useBranch();
   const isLoading = floorsQuery.isLoading || branchLoading;
   const [activeFloorId, setActiveFloorId] = useState<string | undefined>(undefined);
-  const [editModeRequested, setEditMode] = useState(false);
+  const [editModeRequested, setEditModeRaw] = useState(false);
+  const setEditMode = (f: (v: boolean) => boolean) => { setEditModeRaw((v) => { const n = f(v); setWantEdit(n); return n; }); };
   const editMode = canManage && editModeRequested;
   const [editorTable, setEditorTable] = useState<RestaurantTable | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -88,17 +95,17 @@ export default function TablesPage() {
       <TableRequestsBar branchId={branchId} />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
         <div>
-          <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Tables</h1>
+          <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{translate("Tables")}</h1>
           <p className="text-sm text-muted-foreground">
             {editMode
-              ? "Drag tables to match your floor — changes save automatically"
-              : "Live floor status — tap a table to update it"}
+              ? translate("Drag tables to match your floor — changes save automatically")
+              : translate("Live floor status — tap a table to update it")}
           </p>
         </div>
         {canManage && floors && floors.length > 0 && (
           <Button variant={editMode ? "default" : "outline"} size="sm" className="h-11 w-full sm:h-8 sm:w-auto" onClick={() => setEditMode((v) => !v)}>
             <LayoutGrid className="h-4 w-4" />
-            {editMode ? "Done editing" : "Edit floor plan"}
+            {editMode ? translate("Done editing") : translate("Edit floor plan")}
           </Button>
         )}
       </div>
@@ -108,7 +115,7 @@ export default function TablesPage() {
       ) : floorsQuery.isError && !floors ? (
         <QueryError
           error={floorsQuery.error}
-          what="the tables"
+          what={translate("the tables")}
           onRetry={() => void floorsQuery.refetch()}
           retrying={floorsQuery.isFetching}
         />
@@ -121,7 +128,7 @@ export default function TablesPage() {
               {(floors.length > 1 || editMode) && (
                 <ResponsiveTabs
                   className="max-lg:w-full"
-                  label="Floor"
+                  label={translate("Floor")}
                   value={activeFloorId ?? floors[0].id}
                   onChange={setActiveFloorId}
                   items={floors.map((f) => ({ id: f.id, label: f.name }))}
@@ -137,8 +144,14 @@ export default function TablesPage() {
                   <AddFloorDialog branchId={branchId} />
                   <Button variant="outline" size="sm" onClick={openAddTable}>
                     <Plus className="h-4 w-4" />
-                    Add table
+                    {translate("Add table")}
                   </Button>
+                  <a href="/tables/cards" className="inline-flex h-7 items-center rounded-lg border border-border px-2.5 text-[0.8rem] hover:bg-muted">{translate("Table cards (QR + NFC)")}</a>
+                  <a href="/tables/live" className="inline-flex h-7 items-center rounded-lg border border-border px-2.5 text-[0.8rem] hover:bg-muted">{translate("Live board")}</a>
+                  <a href="/tables/nfc" className="inline-flex h-7 items-center rounded-lg border border-border px-2.5 text-[0.8rem] hover:bg-muted">{translate("Ordering mode & NFC tags")}</a>
+                  <CreateTablesDialog branchId={branchId} floorId={activeFloor?.id ?? floors[0].id} floorName={activeFloor?.name ?? floors[0].name} existing={(activeFloor ?? floors[0]).tables.map((t) => t.number)} />
+                  <div className="w-full"><LayoutsBar branchId={branchId} floor={activeFloor ?? floors[0]} /></div>
+                  {(activeFloor ?? floors[0]).tables.length > 0 && <ManageTablesDialog branchId={branchId} tables={(activeFloor ?? floors[0]).tables} floorName={activeFloor?.name ?? floors[0].name} />}
                 </>
               )}
             </div>
@@ -181,7 +194,7 @@ export default function TablesPage() {
                 )}
                 {activeFloor?.tables.length === 0 && (
                   <p className="py-10 text-center text-sm text-muted-foreground">
-                    No tables on this floor yet.
+                    {translate("No tables on this floor yet.")}
                   </p>
                 )}
                 </div>
@@ -189,19 +202,22 @@ export default function TablesPage() {
             </Card>
 
             <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
-              <Legend color="bg-success" label="Available" />
-              <Legend color="bg-primary" label="Occupied" />
-              <Legend color="bg-warning" label="Reserved" />
-              <Legend color="bg-muted-foreground" label="Cleaning / out of service" />
+              <Legend color="bg-success" label={translate("Available")} />
+              <Legend color="bg-primary" label={translate("Occupied")} />
+              <Legend color="bg-warning" label={translate("Reserved")} />
+              <Legend color="bg-muted-foreground" label={translate("Cleaning / out of service")} />
             </div>
           </div>
 
-          <WaitlistPanel branchId={branchId} availableTables={availableTables} />
+          <div className="flex flex-col gap-6">
+            <WaitlistPanel branchId={branchId} availableTables={availableTables} />
+            {!editMode && <GuestCodesPanel branchId={branchId} floors={floors} />}
+          </div>
         </div>
       ) : (
         <Card className="flex flex-col items-center gap-3 p-16 text-center">
-          <p className="text-sm font-medium text-foreground">No floors yet</p>
-          <p className="text-sm text-muted-foreground">{canManage ? "Add your first floor to start building the layout." : "Ask a manager to set up the floor plan."}</p>
+          <p className="text-sm font-medium text-foreground">{translate("No floors yet")}</p>
+          <p className="text-sm text-muted-foreground">{canManage ? translate("Add your first floor to start building the layout.") : translate("Ask a manager to set up the floor plan.")}</p>
           {canManage && <AddFloorDialog branchId={branchId} />}
         </Card>
       )}

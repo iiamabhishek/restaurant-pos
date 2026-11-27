@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -13,7 +14,15 @@ import type {
 import { localDate, zonedRange } from '../../common/time';
 import { BranchTimeService } from '../../common/services/branch-time.service';
 import { PrismaService } from '../../prisma/prisma.service';
-import { computePayroll, netWithAdjustments, round2 } from './payroll.calc';
+import { toCsv } from '../reports/csv';
+import {
+  computePayroll,
+  lateAndAbsence,
+  netWithAdjustments,
+  round2,
+  workedByDay,
+  type LateAbsence,
+} from './payroll.calc';
 
 const dayStart = (d: string) => new Date(`${d}T00:00:00.000Z`);
 const USER = { select: { id: true, name: true } } as const;
@@ -175,6 +184,15 @@ export class HrService {
       name: l.user.name,
       payType: l.user.payProfile?.payType ?? null,
       rate: l.user.payProfile ? Number(l.user.payProfile.rate) : null,
+      overtimeAfterHours:
+        l.user.payProfile?.overtimeAfterHours == null
+          ? null
+          : Number(l.user.payProfile.overtimeAfterHours),
+      overtimeMultiplier: l.user.payProfile
+        ? Number(l.user.payProfile.overtimeMultiplier)
+        : 1.5,
+      lateGraceMinutes: l.user.payProfile?.lateGraceMinutes ?? null,
+      deductAbsence: l.user.payProfile?.deductAbsence ?? false,
     }));
   }
 
@@ -182,8 +200,25 @@ export class HrService {
     await this.assertStaffInBranch(branchId, userId);
     return this.prisma.staffPay.upsert({
       where: { userId },
-      create: { userId, payType: dto.payType, rate: dto.rate },
-      update: { payType: dto.payType, rate: dto.rate },
+      create: {
+        userId,
+        payType: dto.payType,
+        rate: dto.rate,
+        lateGraceMinutes: dto.lateGraceMinutes ?? null,
+        deductAbsence: dto.deductAbsence ?? false,
+        overtimeAfterHours: dto.overtimeAfterHours ?? null,
+        overtimeMultiplier: dto.overtimeMultiplier ?? 1.5,
+      },
+      update: {
+        payType: dto.payType,
+        rate: dto.rate,
+        overtimeAfterHours: dto.overtimeAfterHours ?? null,
+        lateGraceMinutes: dto.lateGraceMinutes ?? null,
+        deductAbsence: dto.deductAbsence ?? false,
+        ...(dto.overtimeMultiplier != null
+          ? { overtimeMultiplier: dto.overtimeMultiplier }
+          : {}),
+      },
     });
   }
 
@@ -245,16 +280,53 @@ export class HrService {
         clockInAt: { lt: zoned.lt },
       },
     });
-    const hours = new Map<string, number>();
+    // Overlapping or duplicate rows (a double tap, two devices) are merged so no minute is paid twice.
+    const byUser = new Map<
+      string,
+      { start: number; end: number; breakMinutes: number }[]
+    >();
     for (const r of records) {
-      const start = Math.max(r.clockInAt.getTime(), zoned.gte.getTime());
-      const end = Math.min(r.clockOutAt!.getTime(), zoned.lt.getTime());
-      if (end > start)
-        hours.set(
-          r.userId,
-          (hours.get(r.userId) ?? 0) + (end - start) / 3_600_000,
+      const list = byUser.get(r.userId) ?? [];
+      list.push({
+        start: r.clockInAt.getTime(),
+        end: r.clockOutAt!.getTime(),
+        breakMinutes: r.breakMinutes,
+      });
+      byUser.set(r.userId, list);
+    }
+    const hours = new Map<string, number>();
+    const daily = new Map<string, number[]>();
+    const warnings: string[] = [];
+    const names = new Map(
+      (
+        await this.prisma.user.findMany({
+          where: { id: { in: links.map((l) => l.user.id) } },
+          select: { id: true, name: true },
+        })
+      ).map((u) => [u.id, u.name]),
+    );
+    for (const [uid, rows] of byUser) {
+      const w = workedByDay(
+        rows,
+        zoned.gte.getTime(),
+        zoned.lt.getTime(),
+        (ms) => localDate(new Date(ms), tz),
+      );
+      hours.set(uid, w.hours);
+      daily.set(uid, w.days);
+      if (w.overlaps > 0)
+        warnings.push(
+          `${names.get(uid) ?? uid}: ${w.overlaps} overlapping attendance record(s) were merged, so that time is paid once.`,
         );
     }
+    const open = await this.prisma.attendance.findMany({
+      where: { branchId, clockOutAt: null, clockInAt: { lt: zoned.lt } },
+      select: { userId: true, clockInAt: true },
+    });
+    for (const o of open)
+      warnings.push(
+        `${names.get(o.userId) ?? o.userId} has no clock-out since ${o.clockInAt.toISOString()}; that shift is NOT counted. Fix the attendance record and build the run again.`,
+      );
 
     const leaves = await this.prisma.leaveRequest.findMany({
       where: {
@@ -266,16 +338,17 @@ export class HrService {
       },
     });
     const unpaidDays = new Map<string, number>();
+    const unpaidByMonth = new Map<string, Record<string, number>>();
     for (const l of leaves) {
       const s = Math.max(l.startDate.getTime(), from.getTime());
       const e = Math.min(l.endDate.getTime(), dayStart(periodEnd).getTime());
-      if (e >= s)
-        unpaidDays.set(
-          l.userId,
-          (unpaidDays.get(l.userId) ?? 0) +
-            Math.round((e - s) / 86_400_000) +
-            1,
-        );
+      for (let t = s; e >= s && t <= e; t += 86_400_000) {
+        const month = new Date(t).toISOString().slice(0, 7);
+        unpaidDays.set(l.userId, (unpaidDays.get(l.userId) ?? 0) + 1);
+        const m = unpaidByMonth.get(l.userId) ?? {};
+        m[month] = (m[month] ?? 0) + 1;
+        unpaidByMonth.set(l.userId, m);
+      }
     }
 
     const tips = await this.prisma.order.aggregate({
@@ -283,6 +356,89 @@ export class HrService {
       _sum: { tipAmount: true },
     });
     const tipPool = round2(Number(tips._sum.tipAmount ?? 0));
+
+    // Late and absence, only for MONTHLY staff whose pay profile switches it on and who have a rota.
+    const lateBy = new Map<string, LateAbsence>();
+    const ruled = links.filter(
+      (l) =>
+        l.user.payProfile!.payType === 'MONTHLY' &&
+        (l.user.payProfile!.lateGraceMinutes != null ||
+          l.user.payProfile!.deductAbsence),
+    );
+    if (ruled.length > 0) {
+      const ids = ruled.map((l) => l.user.id);
+      const [rota, clocks, approved] = await Promise.all([
+        this.prisma.shift.findMany({
+          where: {
+            branchId,
+            userId: { in: ids },
+            startsAt: { gte: zoned.gte, lt: zoned.lt },
+          },
+        }),
+        this.prisma.attendance.findMany({
+          where: {
+            branchId,
+            userId: { in: ids },
+            clockInAt: { lt: zoned.lt },
+            OR: [
+              { clockOutAt: null },
+              {
+                clockOutAt: { gt: new Date(zoned.gte.getTime() - 86_400_000) },
+              },
+            ],
+          },
+        }),
+        this.prisma.leaveRequest.findMany({
+          where: {
+            branchId,
+            userId: { in: ids },
+            status: 'APPROVED',
+            startDate: { lte: dayStart(periodEnd) },
+            endDate: { gte: from },
+          },
+        }),
+      ]);
+      for (const l of ruled) {
+        const prof = l.user.payProfile!;
+        const leaveDates = new Set<string>();
+        for (const lv of approved.filter((x) => x.userId === l.user.id))
+          for (
+            let t = lv.startDate.getTime();
+            t <= lv.endDate.getTime();
+            t += 86_400_000
+          )
+            leaveDates.add(new Date(t).toISOString().slice(0, 10));
+        lateBy.set(
+          l.user.id,
+          lateAndAbsence(
+            rota
+              .filter((x) => x.userId === l.user.id)
+              .map((x) => ({
+                start: x.startsAt.getTime(),
+                end: x.endsAt.getTime(),
+                date: localDate(x.startsAt, tz),
+              })),
+            clocks
+              .filter((c) => c.userId === l.user.id)
+              .map((c) => ({
+                start: c.clockInAt.getTime(),
+                end: c.clockOutAt ? c.clockOutAt.getTime() : null,
+              })),
+            leaveDates,
+            {
+              graceMinutes: prof.lateGraceMinutes,
+              deductAbsence: prof.deductAbsence,
+              dayRate: (date) => {
+                const [y, m] = date.split('-').map(Number);
+                return (
+                  Number(prof.rate) / new Date(Date.UTC(y, m, 0)).getUTCDate()
+                );
+              },
+            },
+          ),
+        );
+      }
+    }
 
     const lines = computePayroll(
       periodStart,
@@ -293,7 +449,15 @@ export class HrService {
         payType: l.user.payProfile!.payType,
         rate: Number(l.user.payProfile!.rate),
         hoursWorked: hours.get(l.user.id) ?? 0,
+        dailyHours: daily.get(l.user.id) ?? [],
+        late: lateBy.get(l.user.id),
+        overtimeAfterHours:
+          l.user.payProfile!.overtimeAfterHours == null
+            ? null
+            : Number(l.user.payProfile!.overtimeAfterHours),
+        overtimeMultiplier: Number(l.user.payProfile!.overtimeMultiplier),
         unpaidLeaveDays: unpaidDays.get(l.user.id) ?? 0,
+        unpaidLeaveByMonth: unpaidByMonth.get(l.user.id),
       })),
     );
 
@@ -313,17 +477,29 @@ export class HrService {
         throw new BadRequestException(
           'A payroll run already covers part of this period',
         );
-      return tx.payrollRun.create({
+      const created = await tx.payrollRun.create({
         data: {
           branchId,
           periodStart: from,
           periodEnd: dayStart(periodEnd),
           tipPool,
           totalNet: round2(lines.reduce((s, l) => s + l.netPay, 0)),
-          lines: { create: lines },
+          lines: {
+            create: lines.map(({ formula, ...l }) => ({
+              ...l,
+              calcInputs: {
+                formula,
+                periodStart,
+                periodEnd,
+                timezone: tz,
+                builtAt: new Date().toISOString(),
+              },
+            })),
+          },
         },
         include: { lines: { include: { user: USER } } },
       });
+      return { ...created, warnings };
     });
   }
 
@@ -338,7 +514,9 @@ export class HrService {
     runId: string,
     userId: string,
     dto: PayrollLineAdjustDto,
+    actor: { id: string; permissions: readonly string[] },
   ) {
+    this.assertNotOwnPayroll(await this.getRun(branchId, runId), actor);
     return this.prisma.$transaction(async (tx) => {
       const run = await tx.payrollRun.findFirst({
         where: { id: runId, branchId },
@@ -364,7 +542,10 @@ export class HrService {
           {
             basePay: Number(line.basePay),
             tipShare: Number(line.tipShare),
-            unpaidLeaveDeduction: Number(line.unpaidLeaveDeduction),
+            unpaidLeaveDeduction:
+              Number(line.unpaidLeaveDeduction) +
+              Number(line.lateDeduction) +
+              Number(line.absenceDeduction),
           },
           next,
         );
@@ -403,7 +584,9 @@ export class HrService {
     id: string,
     userId: string,
     dto: PayrollPayDto,
+    actor?: { id: string; permissions: readonly string[] },
   ) {
+    if (actor) this.assertNotOwnPayroll(await this.getRun(branchId, id), actor);
     const res = await this.prisma.payrollRun.updateMany({
       where: { id, branchId, status: 'FINALIZED' },
       data: {
@@ -452,6 +635,9 @@ export class HrService {
       paymentMethod: run.paymentMethod,
       employee: line.user.name,
       hoursWorked: Number(line.hoursWorked),
+      overtimeHours: Number(line.overtimeHours),
+      overtimePay: Number(line.overtimePay),
+      calculation: line.calcInputs,
       earnings: {
         basePay: Number(line.basePay),
         tipShare: Number(line.tipShare),
@@ -460,6 +646,8 @@ export class HrService {
       },
       deductions: {
         unpaidLeave: Number(line.unpaidLeaveDeduction),
+        late: Number(line.lateDeduction),
+        absence: Number(line.absenceDeduction),
         advanceRecovery: Number(line.advanceRecovery),
         other: Number(line.otherDeductions),
       },
@@ -468,8 +656,89 @@ export class HrService {
     };
   }
 
-  async finalizeRun(branchId: string, id: string) {
+  /**
+   * Separation of duties: someone who is paid on a run may not approve or pay it, unless they can manage
+   * roles (the owner/administrator, who set the pay in the first place).
+   */
+  assertNotOwnPayroll(
+    run: { lines: { userId: string }[] },
+    actor: { id: string; permissions: readonly string[] },
+  ) {
+    if (
+      run.lines.some((l) => l.userId === actor.id) &&
+      !actor.permissions.includes('roles.manage')
+    )
+      throw new ForbiddenException(
+        'You are paid on this payroll, so someone else must approve and pay it.',
+      );
+  }
+
+  /** FINALIZED -> DRAFT so a mistake can be corrected before payment. Never after payment. */
+  async reopenRun(
+    branchId: string,
+    id: string,
+    actor: { id: string; permissions: readonly string[] },
+  ) {
+    this.assertNotOwnPayroll(await this.getRun(branchId, id), actor);
+    const res = await this.prisma.payrollRun.updateMany({
+      where: { id, branchId, status: 'FINALIZED' },
+      data: { status: 'DRAFT', finalizedAt: null },
+    });
+    if (res.count === 0)
+      throw new BadRequestException(
+        'Only a finalized, unpaid payroll can be reopened. A paid payroll is corrected by an adjustment in the next run.',
+      );
+    return this.getRun(branchId, id);
+  }
+
+  async runCsv(branchId: string, id: string) {
     const run = await this.getRun(branchId, id);
+    const p = (d: Date) => d.toISOString().slice(0, 10);
+    return toCsv(
+      [
+        'Employee',
+        'Period',
+        'Status',
+        'Hours',
+        'Base pay',
+        'Tip share',
+        'Allowances',
+        'Bonus',
+        'Unpaid leave',
+        'Late',
+        'Absence',
+        'Advance recovery',
+        'Other deductions',
+        'Net pay',
+        'Note',
+      ],
+      run.lines.map((l) => [
+        l.user.name,
+        `${p(run.periodStart)} to ${p(run.periodEnd)}`,
+        run.status,
+        Number(l.hoursWorked),
+        Number(l.basePay),
+        Number(l.tipShare),
+        Number(l.allowances),
+        Number(l.bonus),
+        Number(l.unpaidLeaveDeduction),
+        Number(l.lateDeduction),
+        Number(l.absenceDeduction),
+        Number(l.advanceRecovery),
+        Number(l.otherDeductions),
+        Number(l.netPay),
+        l.adjustmentNote,
+      ]),
+    );
+  }
+
+  async finalizeRun(
+    branchId: string,
+    id: string,
+    actor?: { id: string; permissions: readonly string[] },
+  ) {
+    const run = await this.getRun(branchId, id);
+    if (actor) this.assertNotOwnPayroll(run, actor);
     if (run.status !== 'DRAFT')
       throw new BadRequestException('Already finalized');
     return this.prisma.payrollRun.update({
@@ -491,7 +760,8 @@ export class HrService {
   // --- Performance ---------------------------------------------------------
 
   async performance(branchId: string, from: string, to: string) {
-    const range = zonedRange(from, to, await this.time.tzForBranch(branchId));
+    const tz = await this.time.tzForBranch(branchId);
+    const range = zonedRange(from, to, tz);
     const f = range.gte;
     const t = range.lt;
     const [orders, attendance, links] = await Promise.all([
@@ -513,18 +783,30 @@ export class HrService {
         include: { user: USER },
       }),
     ]);
-    const hours = new Map<string, number>();
-    for (const r of attendance) {
-      const s = Math.max(r.clockInAt.getTime(), f.getTime());
-      const e = Math.min(r.clockOutAt!.getTime(), t.getTime());
-      if (e > s)
-        hours.set(r.userId, (hours.get(r.userId) ?? 0) + (e - s) / 3_600_000);
+    // Use the same merge/break logic as payroll. A naive clip-and-sum double
+    // counts overlapping taps and ignores unpaid breaks, so KPI hours do not
+    // reconcile with what the staff member was actually paid for.
+    const hoursByUser = new Map<string, number>();
+    for (const userId of new Set(attendance.map((r) => r.userId))) {
+      const shifts = attendance
+        .filter((r) => r.userId === userId && r.clockOutAt)
+        .map((r) => ({
+          start: r.clockInAt.getTime(),
+          end: r.clockOutAt!.getTime(),
+          breakMinutes: Number(r.breakMinutes ?? 0),
+        }));
+      hoursByUser.set(
+        userId,
+        workedByDay(shifts, f.getTime(), t.getTime(), (ms) =>
+          localDate(new Date(ms), tz),
+        ).hours,
+      );
     }
     const byUser = new Map(orders.map((o) => [o.createdById, o]));
     return links
       .map((l) => {
         const o = byUser.get(l.user.id);
-        const h = hours.get(l.user.id) ?? 0;
+        const h = hoursByUser.get(l.user.id) ?? 0;
         const sales = Number(o?._sum.totalAmount ?? 0);
         return {
           userId: l.user.id,

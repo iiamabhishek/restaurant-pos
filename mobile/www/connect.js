@@ -140,11 +140,34 @@
       // The phone was left in standalone mode: go straight back to the POS.
       if (r.startMode === 'standalone' && !/[?&]stay=1/.test(location.search)) { location.replace('pos/index.html'); return; } document.getElementById('ver').textContent = 'Version ' + r.version; if (r.localUrl && !inLocal.value) inLocal.value = r.localUrl; if (r.externalUrl && !inOnline.value) inOnline.value = r.externalUrl; }).catch(function () {});
   }
-  var sa = document.getElementById('standalone');
-  if (sa && native && P.ServerLink) {
-    sa.hidden = false;
-    sa.addEventListener('click', function () { P.ServerLink.setMode({ mode: 'standalone' }); });
-  }
   var qs = new URLSearchParams(location.search);
   if (qs.get('server')) { var q = qs.get('server'); if (isLocal(q)) inLocal.value = q; else inOnline.value = q; }
+
+  function useOffline() {
+    if (native && P.ServerLink) P.ServerLink.setMode({ mode: 'standalone' });
+    else location.href = 'pos/index.html';
+  }
+  document.getElementById('pick-offline').addEventListener('click', useOffline);
+
+  // Check the connection while the address is typed, so the user knows before pressing Connect.
+  var statusEl = document.getElementById('status');
+  var timer = 0, seq = 0;
+  function show(kind, text) { statusEl.className = 'msg ' + kind; statusEl.textContent = text; statusEl.hidden = !text; }
+  async function liveCheck() {
+    var l = normalize(inLocal.value, 'local'), o = normalize(inOnline.value, 'online');
+    var mine = ++seq;
+    if (!l && !o) { show('', ''); return; }
+    show('', 'Checking the connection...');
+    var res = await Promise.all([probe(l), probe(o)]);
+    if (mine !== seq) return;
+    var good = res.filter(function (x) { return x && x.ok; });
+    if (!good.length) { show('bad', "Can't reach a server at that address yet. Check it, and that this phone is on the restaurant WiFi."); return; }
+    if (good.some(function (x) { return !x.setup; })) { show('bad', 'Server found, but it has no restaurant yet. Finish setup in a browser first.'); return; }
+    var bad = (l && !res[0].ok) ? 'local' : (o && !res[1].ok) ? 'online' : '';
+    show('ok', bad ? 'Server found. The ' + bad + ' address does not answer from here (fine if it only works on the other network).' : 'Connected. This server is ready.');
+  }
+  function schedule() { clearTimeout(timer); say('', ''); timer = setTimeout(liveCheck, 700); }
+  inLocal.addEventListener('input', schedule);
+  inOnline.addEventListener('input', schedule);
+  if (inLocal.value || inOnline.value) liveCheck();
 })();

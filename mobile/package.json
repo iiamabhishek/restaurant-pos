@@ -1,6 +1,6 @@
 {
   "name": "orderrestro-mobile",
-  "version": "1.25.0",
+  "version": "1.47.0",
   "private": true,
   "description": "OrderRestro staff and rider app for Android and iOS (Capacitor).",
   "scripts": {
@@ -25,5 +25,9 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^7.0.0"
+  },
+  "overrides": {
+    "minimatch": "^11.0.9",
+    "glob": "^14.0.6"
   }
 }

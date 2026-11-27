@@ -1,12 +1,16 @@
+"use client";
+
+import { useI18n } from "@/lib/i18n/context";
 import { cn } from "@/lib/utils";
 
 // Small glowing dot shown next to a nav item / settings tab that has
 // something the user should look at (a new order, an update, a failed backup).
 export function NavDot({ className, label }: { className?: string; label?: string }) {
+  const { t } = useI18n();
   return (
     <span
       role="status"
-      aria-label={label ?? "Needs attention"}
+      aria-label={label ?? t("Needs attention")}
       className={cn("relative ml-auto flex h-2.5 w-2.5 shrink-0", className)}
     >
       <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />

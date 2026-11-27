@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { ImagePlus, X } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "@/lib/toast";
@@ -40,21 +41,25 @@ import {
   type RestaurantSettings,
 } from "@/hooks/use-settings";
 import { ApiError } from "@/lib/api";
+import { QueryError } from "@/components/ui/query-error";
 
 export default function SettingsPage() {
+  const { t } = useI18n();
   const { branchId } = useBranch();
-  const { data, isLoading } = useSettings(branchId);
+  const { data, isLoading, isError, error, refetch, isFetching } = useSettings(branchId);
 
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Settings</h1>
-        <p className="text-sm text-muted-foreground">Restaurant, branch, and staff configuration</p>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("Settings")}</h1>
+        <p className="text-sm text-muted-foreground">{t("Restaurant, branch, and staff configuration")}</p>
       </div>
 
       <SettingsTabs />
 
-      {isLoading || !data ? (
+      {isError ? (
+        <QueryError error={error} what={t("the settings")} onRetry={() => void refetch()} retrying={isFetching} />
+      ) : isLoading || !data ? (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <Skeleton className="h-72 rounded-xl" />
           <Skeleton className="h-72 rounded-xl" />
@@ -88,28 +93,27 @@ function OnlineOrdersCard({
   branchId: string | null;
   branch: { autoConfirmOrders: boolean; autoConfirmReservations: boolean };
 }) {
+  const { t } = useI18n();
   const update = useUpdateBranchSettings(branchId);
   const save = (dto: { autoConfirmOrders?: boolean; autoConfirmReservations?: boolean }) =>
     update.mutate(dto, {
-      onSuccess: () => toast.success("Saved"),
-      onError: (err) => toast.error(err instanceof Error ? err.message : "Could not save"),
+      onSuccess: () => toast.success(t("Saved")),
+      onError: (err) => toast.error(err instanceof Error ? err.message : t("Could not save")),
     });
 
   return (
     <Card className="flex flex-col gap-4 p-6">
       <div>
-        <h2 className="text-[18px] font-medium text-foreground">Online orders &amp; table bookings</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{t("Online orders & table bookings")}</h2>
         <p className="text-sm text-muted-foreground">
-          Choose whether orders and bookings from your website are accepted automatically or wait for
-          you to accept them. You can always cancel an order or booking from its window.
+          {t("Choose whether orders and bookings from your website are accepted automatically or wait for you to accept them. You can always cancel an order or booking from its window.")}
         </p>
       </div>
       <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
         <div className="flex flex-col gap-0.5">
-          <Label htmlFor="auto-confirm-orders">Auto-confirm online orders</Label>
+          <Label htmlFor="auto-confirm-orders">{t("Auto-confirm online orders")}</Label>
           <p className="text-xs text-muted-foreground">
-            Off = each new order rings, then waits for you to Accept or Reject before it reaches the
-            kitchen. On = sent to the kitchen straight away.
+            {t("Off = each new order rings, then waits for you to Accept or Reject before it reaches the kitchen. On = sent to the kitchen straight away.")}
           </p>
         </div>
         <Switch
@@ -121,9 +125,9 @@ function OnlineOrdersCard({
       </div>
       <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
         <div className="flex flex-col gap-0.5">
-          <Label htmlFor="auto-confirm-bookings">Auto-confirm table bookings</Label>
+          <Label htmlFor="auto-confirm-bookings">{t("Auto-confirm table bookings")}</Label>
           <p className="text-xs text-muted-foreground">
-            Off = new bookings wait for you to Accept. On = confirmed automatically.
+            {t("Off = new bookings wait for you to Accept. On = confirmed automatically.")}
           </p>
         </div>
         <Switch
@@ -138,23 +142,22 @@ function OnlineOrdersCard({
 }
 
 function NotificationSettingsCard() {
+  const { t } = useI18n();
   const [muted, toggleMuted] = useNotificationMute();
 
   return (
     <Card className="flex flex-col gap-4 p-6">
       <div>
-        <h2 className="text-[18px] font-medium text-foreground">Notifications</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{t("Notifications")}</h2>
         <p className="text-sm text-muted-foreground">
-          New orders, table reservations, and kitchen tickets on this device.
+          {t("New orders, table reservations, and kitchen tickets on this device.")}
         </p>
       </div>
       <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
         <div className="flex flex-col gap-0.5">
-          <Label htmlFor="notification-sound">Notification sound</Label>
+          <Label htmlFor="notification-sound">{t("Notification sound")}</Label>
           <p className="text-xs text-muted-foreground">
-            Plays a chime for new orders, reservations, and kitchen display
-            tickets. This only affects this device/browser — mute the
-            kitchen display separately from the office if needed.
+            {t("Plays a chime for new orders, reservations, and kitchen display tickets. This only affects this device/browser — mute the kitchen display separately from the office if needed.")}
           </p>
         </div>
         <Switch
@@ -176,6 +179,7 @@ function GeneralSettingsForm({
   branch: BranchSettings;
   branchId: string | null;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState(restaurant.name);
   const [legalName, setLegalName] = useState(restaurant.legalName ?? "");
   const [logoUrl, setLogoUrl] = useState<string | null>(restaurant.logoUrl);
@@ -241,8 +245,8 @@ function GeneralSettingsForm({
         requireDiscountReason: requireReason,
       },
       {
-        onSuccess: () => saveToast.success("Restaurant details saved"),
-        onError: (err) => saveToast.error(err instanceof ApiError ? err.message : "Could not save"),
+        onSuccess: () => saveToast.success(t("Restaurant details saved")),
+        onError: (err) => saveToast.error(err instanceof ApiError ? err.message : t("Could not save")),
       },
     );
   };
@@ -262,8 +266,8 @@ function GeneralSettingsForm({
         taxId: taxId || null,
       },
       {
-        onSuccess: () => toast.success("Branch details saved"),
-        onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not save"),
+        onSuccess: () => toast.success(t("Branch details saved")),
+        onError: (err) => toast.error(err instanceof ApiError ? err.message : t("Could not save")),
       },
     );
   };
@@ -281,10 +285,10 @@ function GeneralSettingsForm({
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
       <Card className="flex flex-col gap-4 p-6">
-        <h2 className="text-[18px] font-medium text-foreground">Restaurant</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{t("Restaurant")}</h2>
         <form onSubmit={onSubmitRestaurant} className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <Label>Logo</Label>
+            <Label>{t("Logo")}</Label>
             <div className="flex items-center gap-4">
               <input
                 ref={logoInputRef}
@@ -297,7 +301,7 @@ function GeneralSettingsForm({
                   uploadLogo.mutate(file, {
                     onSuccess: (res) => setLogoUrl(res.url),
                     onError: (err) =>
-                      toast.error(err instanceof ApiError ? err.message : "Could not upload logo"),
+                      toast.error(err instanceof ApiError ? err.message : t("Could not upload logo")),
                   });
                 }}
               />
@@ -312,7 +316,7 @@ function GeneralSettingsForm({
                       if (logoInputRef.current) logoInputRef.current.value = "";
                     }}
                     className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-background/80 text-foreground"
-                    aria-label="Remove logo"
+                    aria-label={t("Remove logo")}
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -326,18 +330,17 @@ function GeneralSettingsForm({
                 >
                   <ImagePlus className="h-4 w-4" />
                   <span className="text-[10px]">
-                    {uploadLogo.isPending ? "Uploading…" : "Upload"}
+                    {uploadLogo.isPending ? t("Uploading…") : t("Upload")}
                   </span>
                 </button>
               )}
               <p className="text-xs text-muted-foreground">
-                Shows in the app sidebar and login screen instead of the OrderRestro mark.
-                Square, at least 256×256px, PNG with a transparent background works best.
+                {t("Shows in the app sidebar and login screen instead of the OrderRestro mark. Square, at least 256×256px, PNG with a transparent background works best.")}
               </p>
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="r-name">Name</Label>
+            <Label htmlFor="r-name">{t("Name")}</Label>
             <Input
               id="r-name"
               value={name}
@@ -350,12 +353,12 @@ function GeneralSettingsForm({
             </p>
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="r-legal">Legal name</Label>
+            <Label htmlFor="r-legal">{t("Legal name")}</Label>
             <Input id="r-legal" value={legalName} onChange={(e) => setLegalName(e.target.value)} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-currency">Currency</Label>
+              <Label htmlFor="r-currency">{t("Currency")}</Label>
               <Input
                 id="r-currency"
                 value={currency}
@@ -365,20 +368,20 @@ function GeneralSettingsForm({
               />
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-timezone">Timezone</Label>
+              <Label htmlFor="r-timezone">{t("Timezone")}</Label>
               <Input id="r-timezone" value={timezone} onChange={(e) => setTimezone(e.target.value)} required />
             </div>
           </div>
 
           <div className="flex flex-col gap-2 border-t border-border pt-4">
-            <h3 className="text-sm font-medium text-foreground">Loyalty program</h3>
+            <h3 className="text-sm font-medium text-foreground">{t("Loyalty program")}</h3>
             <p className="text-xs text-muted-foreground">
-              How customers earn and redeem points at checkout.
+              {t("How customers earn and redeem points at checkout.")}
             </p>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-loyalty-earn">Earn 1 point per</Label>
+              <Label htmlFor="r-loyalty-earn">{t("Earn 1 point per")}</Label>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">{currency}</span>
                 <Input
@@ -393,7 +396,7 @@ function GeneralSettingsForm({
               </div>
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-loyalty-value">1 point redeems for</Label>
+              <Label htmlFor="r-loyalty-value">{t("1 point redeems for")}</Label>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">{currency}</span>
                 <Input
@@ -412,23 +415,19 @@ function GeneralSettingsForm({
           <div className="flex flex-col gap-3 rounded-lg border border-border p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <h3 className="text-sm font-medium text-foreground">Referral rewards</h3>
-                <p className="text-xs text-muted-foreground">
-                  Customers share a dish or their personal link. Points are paid only after the new customer&apos;s
-                  first purchase is paid. Points are worth the &ldquo;1 point redeems for&rdquo; amount above
-                  (for 100 points = {currency} 10, enter 0.10).
-                </p>
+                <h3 className="text-sm font-medium text-foreground">{t("Referral rewards")}</h3>
+                <p className="text-xs text-muted-foreground">{t("Customers share a dish or their personal link. Points are paid only after the new customer's first purchase is paid. Points are worth the “1 point redeems for” amount above (for 100 points = {currency} 10, enter 0.10).", { currency })}</p>
               </div>
               <Switch
                 id="r-referral-enabled"
-                aria-label="Enable referral rewards"
+                aria-label={t("Enable referral rewards")}
                 checked={referralEnabled}
                 onCheckedChange={setReferralEnabled}
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="flex flex-col gap-2">
-                <Label htmlFor="r-referral-sharer">Points for the customer who shares</Label>
+                <Label htmlFor="r-referral-sharer">{t("Points for the customer who shares")}</Label>
                 <Input
                   id="r-referral-sharer"
                   type="number"
@@ -440,7 +439,7 @@ function GeneralSettingsForm({
                 />
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="r-referral-referred">Points for the new customer</Label>
+                <Label htmlFor="r-referral-referred">{t("Points for the new customer")}</Label>
                 <Input
                   id="r-referral-referred"
                   type="number"
@@ -453,7 +452,7 @@ function GeneralSettingsForm({
               </div>
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-referral-min">Minimum food value of the first order for rewards ({currency})</Label>
+              <Label htmlFor="r-referral-min">{t("Minimum food value of the first order for rewards ({currency})", { currency })}</Label>
               <Input
                 id="r-referral-min"
                 type="number"
@@ -468,39 +467,38 @@ function GeneralSettingsForm({
 
           <div className="flex flex-col gap-3 rounded-lg border border-border p-4">
             <div>
-              <h3 className="text-sm font-medium text-foreground">Website food prices</h3>
+              <h3 className="text-sm font-medium text-foreground">{t("Website food prices")}</h3>
               <p className="text-xs text-muted-foreground">
-                Make every dish cheaper or costlier for customers ordering on your website, by a percentage or a fixed
-                amount. In-restaurant, POS and marketplace prices do not change. Leave at 0 for no change.
+                {t("Make every dish cheaper or costlier for customers ordering on your website, by a percentage or a fixed amount. In-restaurant, POS and marketplace prices do not change. Leave at 0 for no change.")}
               </p>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="flex flex-col gap-2">
-                <Label htmlFor="r-adjust-dir">Make prices</Label>
+                <Label htmlFor="r-adjust-dir">{t("Make prices")}</Label>
                 <select
                   id="r-adjust-dir"
                   className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   value={adjustDir}
                   onChange={(e) => setAdjustDir(e.target.value as "cheaper" | "costlier")}
                 >
-                  <option value="cheaper">Cheaper</option>
-                  <option value="costlier">Costlier</option>
+                  <option value="cheaper">{t("Cheaper")}</option>
+                  <option value="costlier">{t("Costlier")}</option>
                 </select>
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="r-adjust-kind">By</Label>
+                <Label htmlFor="r-adjust-kind">{t("By")}</Label>
                 <select
                   id="r-adjust-kind"
                   className="h-10 rounded-md border border-input bg-background px-3 text-sm"
                   value={adjustKind}
                   onChange={(e) => setAdjustKind(e.target.value as "PERCENT" | "AMOUNT")}
                 >
-                  <option value="PERCENT">Percentage (%)</option>
-                  <option value="AMOUNT">Amount ({currency} per dish)</option>
+                  <option value="PERCENT">{t("Percentage (%)")}</option>
+                  <option value="AMOUNT">{t("Amount ({currency} per dish)", { currency })}</option>
                 </select>
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="r-adjust-value">{adjustKind === "PERCENT" ? "Percent" : `Amount (${currency})`}</Label>
+                <Label htmlFor="r-adjust-value">{adjustKind === "PERCENT" ? t("Percent") : t("Amount ({currency})", { currency })}</Label>
                 <Input
                   id="r-adjust-value"
                   type="number"
@@ -513,20 +511,20 @@ function GeneralSettingsForm({
             </div>
             <p className="text-xs text-muted-foreground" aria-live="polite">
               {Number(adjustValue) > 0
-                ? `A ${currency} 100 dish will cost ${currency} ${Math.max(
+                ? t("A {currency} 100 dish will cost {currency2} {max} on the website.", { currency, currency2: currency, max: Math.max(
                     Math.round(
                       (adjustKind === "PERCENT"
                         ? 100 * (1 + ((adjustDir === "cheaper" ? -1 : 1) * Number(adjustValue)) / 100)
                         : 100 + (adjustDir === "cheaper" ? -1 : 1) * Number(adjustValue)) * 100,
                     ) / 100,
                     0,
-                  )} on the website.`
-                : "No change to website prices."}
+                  ) })
+                : t("No change to website prices.")}
             </p>
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="r-online-min">Smallest online order accepted ({currency}, 0 = no minimum)</Label>
+            <Label htmlFor="r-online-min">{t("Smallest online order accepted ({currency}, 0 = no minimum)", { currency })}</Label>
             <Input
               id="r-online-min"
               type="number"
@@ -536,14 +534,13 @@ function GeneralSettingsForm({
               onChange={(e) => setOnlineMinOrder(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              Orders from your website or the API below this amount are refused. Marketplace orders (Zomato, Swiggy)
-              and table QR orders are not affected.
+              {t("Orders from your website or the API below this amount are refused. Marketplace orders (Zomato, Swiggy) and table QR orders are not affected.")}
             </p>
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-max-discount">Highest cashier discount (%)</Label>
+              <Label htmlFor="r-max-discount">{t("Highest cashier discount (%)")}</Label>
               <Input
                 id="r-max-discount"
                 type="number"
@@ -554,7 +551,7 @@ function GeneralSettingsForm({
                 onChange={(e) => setMaxDiscount(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                100 means no limit. Owners, administrators and roles with “Discount Above the Cashier Limit” can go higher.
+                {t("100 means no limit. Owners, administrators and roles with “Discount Above the Cashier Limit” can go higher.")}
               </p>
             </div>
             <label className="flex items-start gap-2 text-sm sm:pt-7">
@@ -564,26 +561,26 @@ function GeneralSettingsForm({
                 checked={requireReason}
                 onChange={(e) => setRequireReason(e.target.checked)}
               />
-              Require a reason for every discount
+              {t("Require a reason for every discount")}
             </label>
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-upi">UPI id (for QR payments)</Label>
+              <Label htmlFor="r-upi">{t("UPI id (for QR payments)")}</Label>
               <Input
                 id="r-upi"
                 value={upiVpa}
                 onChange={(e) => setUpiVpa(e.target.value)}
-                placeholder="yourshop@okbank"
+                placeholder={t("yourshop@okbank")}
                 autoComplete="off"
               />
               <p className="text-xs text-muted-foreground">
-                Shown as a scannable QR at checkout and on the customer display, with the exact bill amount filled in.
+                {t("Shown as a scannable QR at checkout and on the customer display, with the exact bill amount filled in.")}
               </p>
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-upi-name">UPI payee name</Label>
+              <Label htmlFor="r-upi-name">{t("UPI payee name")}</Label>
               <Input
                 id="r-upi-name"
                 value={upiPayeeName}
@@ -596,42 +593,42 @@ function GeneralSettingsForm({
 
           <StatusNote note={saveNote} onClear={clearSaveNote} />
           <Button type="submit" disabled={updateRestaurant.isPending} className="self-start">
-            {updateRestaurant.isPending ? "Saving…" : "Save restaurant"}
+            {updateRestaurant.isPending ? t("Saving…") : t("Save restaurant")}
           </Button>
         </form>
       </Card>
 
       <Card className="flex flex-col gap-4 p-6">
-        <h2 className="text-[18px] font-medium text-foreground">This branch</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{t("This branch")}</h2>
         <form onSubmit={onSubmitBranch} className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
-            <Label htmlFor="b-name">Branch name</Label>
+            <Label htmlFor="b-name">{t("Branch name")}</Label>
             <Input id="b-name" value={branchName} onChange={(e) => setBranchName(e.target.value)} required />
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="b-address">Address</Label>
+            <Label htmlFor="b-address">{t("Address")}</Label>
             <Input id="b-address" value={address} onChange={(e) => setAddress(e.target.value)} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="b-phone">Phone</Label>
+              <Label htmlFor="b-phone">{t("Phone")}</Label>
               <Input id="b-phone" value={phone} onChange={(e) => setPhone(e.target.value)} />
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="b-gst">GST number (legacy)</Label>
+              <Label htmlFor="b-gst">{t("GST number (legacy)")}</Label>
               <Input id="b-gst" value={gstNumber} onChange={(e) => setGstNumber(e.target.value)} />
             </div>
           </div>
 
           <div className="flex flex-col gap-2 border-t border-border pt-4">
-            <h3 className="text-sm font-medium text-foreground">Tax</h3>
+            <h3 className="text-sm font-medium text-foreground">{t("Tax")}</h3>
             <p className="text-xs text-muted-foreground">
-              Picks how menu prices and receipts handle tax for this branch.
+              {t("Picks how menu prices and receipts handle tax for this branch.")}
             </p>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="b-tax-regime">Region / regime</Label>
+              <Label htmlFor="b-tax-regime">{t("Region / regime")}</Label>
               <Select value={taxRegime} onValueChange={onRegimeChange}>
                 <SelectTrigger id="b-tax-regime">
                   <SelectValue />
@@ -646,24 +643,22 @@ function GeneralSettingsForm({
               </Select>
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="b-tax-mode">Menu prices are</Label>
+              <Label htmlFor="b-tax-mode">{t("Menu prices are")}</Label>
               <Select value={taxMode} onValueChange={(v) => setTaxMode(v as TaxMode)}>
                 <SelectTrigger id="b-tax-mode">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="INCLUSIVE">Tax-inclusive</SelectItem>
-                  <SelectItem value="EXCLUSIVE">Tax-exclusive (tax added at checkout)</SelectItem>
+                  <SelectItem value="INCLUSIVE">{t("Tax-inclusive")}</SelectItem>
+                  <SelectItem value="EXCLUSIVE">{t("Tax-exclusive (tax added at checkout)")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">
-            {preset.exampleRates} — set the exact rate per menu item under Menu.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("{exampleRates} — set the exact rate per menu item under Menu.", { exampleRates: preset.exampleRates })}</p>
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="b-country">Country code</Label>
+              <Label htmlFor="b-country">{t("Country code")}</Label>
               <Input
                 id="b-country"
                 value={country}
@@ -677,7 +672,7 @@ function GeneralSettingsForm({
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="b-tax-label">Receipt label override (optional)</Label>
+            <Label htmlFor="b-tax-label">{t("Receipt label override (optional)")}</Label>
             <Input
               id="b-tax-label"
               value={taxLabel}
@@ -687,15 +682,12 @@ function GeneralSettingsForm({
           </div>
 
           <Button type="submit" disabled={updateBranch.isPending} className="self-start">
-            {updateBranch.isPending ? "Saving…" : "Save branch"}
+            {updateBranch.isPending ? t("Saving…") : t("Save branch")}
           </Button>
         </form>
       </Card>
 
-      <p className="text-xs text-muted-foreground">
-        Nodedr OrderRestro is free software under the GNU AGPL-3.0. The source code of the version
-        you are using is available to every user of this service at{" "}
-        <a
+      <p className="text-xs text-muted-foreground">{t("Nodedr OrderRestro is free software under the GNU AGPL-3.0. The source code of the version you are using is available to every user of this service at")} <a
           className="underline"
           href="https://github.com/Raktim94/nodedr-restaurant-pos"
           target="_blank"

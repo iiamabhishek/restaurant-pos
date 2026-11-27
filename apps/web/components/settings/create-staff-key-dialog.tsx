@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -16,6 +17,7 @@ export function CreateStaffKeyDialog({
   onClose: () => void;
   onCreated: (token: string) => void;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const createKey = useCreateStaffApiKey();
 
@@ -25,7 +27,7 @@ export function CreateStaffKeyDialog({
       { name: name.trim() },
       {
         onSuccess: (created) => onCreated(created.token),
-        onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not create API key"),
+        onError: (err) => toast.error(err instanceof ApiError ? err.message : t("Could not create API key")),
       },
     );
   };
@@ -35,31 +37,30 @@ export function CreateStaffKeyDialog({
       <DialogContent className="sm:max-w-md">
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>New personal API key</DialogTitle>
+            <DialogTitle>{t("New personal API key")}</DialogTitle>
           </DialogHeader>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="sk-name">Name</Label>
+            <Label htmlFor="sk-name">{t("Name")}</Label>
             <Input
               id="sk-name"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Claude Desktop"
+              placeholder={t("e.g. Claude Desktop")}
               required
               autoFocus
             />
             <p className="text-xs text-muted-foreground">
-              This key lets an AI client (like Claude Desktop) or any script act as you, with your exact
-              permissions — see the MCP connection details below once created.
+              {t("This key lets an AI client (like Claude Desktop) or any script act as you, with your exact permissions — see the MCP connection details below once created.")}
             </p>
           </div>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={createKey.isPending}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button type="submit" disabled={createKey.isPending}>
-              {createKey.isPending ? "Creating…" : "Create key"}
+              {createKey.isPending ? t("Creating…") : t("Create key")}
             </Button>
           </DialogFooter>
         </form>

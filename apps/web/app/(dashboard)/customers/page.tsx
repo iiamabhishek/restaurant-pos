@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Gift, Pencil, Star, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
@@ -15,6 +17,8 @@ import { useCustomers, useDeleteCustomer, type Customer } from "@/hooks/use-cust
 import { ApiError } from "@/lib/api";
 
 export default function CustomersPage() {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { branchId } = useBranch();
   const [search, setSearch] = useState("");
   const { data: customers, isLoading } = useCustomers(branchId, search || undefined);
@@ -24,11 +28,11 @@ export default function CustomersPage() {
   const onDelete = (e: React.MouseEvent, customer: Customer) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!confirm(`Delete ${customer.name ?? "this customer"}? This cannot be undone.`)) return;
+    if (!confirm(t("Delete {value}? This cannot be undone.", { value: customer.name ?? t("this customer") }))) return;
     deleteCustomer.mutate(customer.id, {
-      onSuccess: () => toast.success(`${customer.name ?? "Customer"} deleted`),
+      onSuccess: () => toast.success(t("{value} deleted", { value: customer.name ?? t("Customer") })),
       onError: (err) =>
-        toast.error(err instanceof ApiError ? err.message : "Could not delete customer"),
+        toast.error(err instanceof ApiError ? err.message : t("Could not delete customer")),
     });
   };
 
@@ -36,14 +40,16 @@ export default function CustomersPage() {
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Customers</h1>
-          <p className="text-sm text-muted-foreground">Profiles, loyalty, and order history</p>
+          <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("Customers")}</h1>
+          <Link href="/ratings" className="mt-1 inline-block text-sm underline">{t("Customer ratings")}</Link>
+          <Link href="/customers/dues" className="ml-3 mt-1 inline-block text-sm underline">{t("Customer dues")}</Link>
+          <p className="text-sm text-muted-foreground">{t("Profiles, loyalty, and order history")}</p>
         </div>
         <AddCustomerDialog branchId={branchId} />
       </div>
 
       <Input
-        placeholder="Search by name, phone, or email…"
+        placeholder={t("Search by name, phone, or email…")}
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         className="max-w-sm"
@@ -65,20 +71,18 @@ export default function CustomersPage() {
             >
               <div className="flex flex-col">
                 <span className="text-sm font-medium text-foreground">
-                  {c.name ?? "Unnamed customer"}
+                  {c.name ?? t("Unnamed customer")}
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {[c.phone, c.email].filter(Boolean).join(" · ") || "No contact info"}
+                  {[c.phone, c.email, c.pincode, c.status === "INACTIVE" ? t("Inactive") : null].filter(Boolean).join(" · ") || t("No contact info")}
                 </span>
               </div>
               <div className="flex items-center gap-4 text-xs text-muted-foreground">
                 <span className="flex items-center gap-1">
-                  <Star className="h-3.5 w-3.5" />
-                  {c.loyaltyPoints} pts
-                </span>
+                  <Star className="h-3.5 w-3.5" />{t("{loyaltyPoints} pts", { loyaltyPoints: c.loyaltyPoints })}</span>
                 {Number(c.walletBalance) > 0 && (
                   <span className="flex items-center gap-1">
-                    <Gift className="h-3.5 w-3.5" />₹{c.walletBalance}
+                    <Gift className="h-3.5 w-3.5" />{fmt.currency(Number(c.walletBalance))}
                   </span>
                 )}
                 <div className="flex items-center gap-0.5">
@@ -86,7 +90,7 @@ export default function CustomersPage() {
                     variant="ghost"
                     size="icon"
                     className="h-8 w-8 text-muted-foreground hover:text-primary"
-                    title="Edit customer"
+                    title={t("Edit customer")}
                     onClick={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
@@ -99,7 +103,7 @@ export default function CustomersPage() {
                     variant="ghost"
                     size="icon"
                     className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                    title="Delete customer"
+                    title={t("Delete customer")}
                     onClick={(e) => onDelete(e, c)}
                   >
                     <Trash2 className="h-4 w-4" />
@@ -110,9 +114,9 @@ export default function CustomersPage() {
           ))
         ) : (
           <div className="flex flex-col items-center gap-2 py-16 text-center">
-            <p className="text-sm font-medium text-foreground">No customers yet</p>
+            <p className="text-sm font-medium text-foreground">{t("No customers yet")}</p>
             <p className="text-sm text-muted-foreground">
-              Add a profile to start tracking loyalty and order history.
+              {t("Add a profile to start tracking loyalty and order history.")}
             </p>
           </div>
         )}

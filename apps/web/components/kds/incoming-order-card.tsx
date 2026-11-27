@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Check, Clock, Globe, X } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -19,6 +21,8 @@ function minutesSince(iso: string) {
 // ticket until it is accepted, so it lives here, above the ticket columns,
 // with a big Accept and a deliberate Decline.
 export function IncomingOrderCard({ order, branchId }: { order: IncomingOrder; branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const accept = useAcceptIncoming(branchId);
   const decline = useDeclineIncoming(branchId);
   const [declineOpen, setDeclineOpen] = useState(false);
@@ -31,21 +35,21 @@ export function IncomingOrderCard({ order, branchId }: { order: IncomingOrder; b
       <ReasonDialog
         open={declineOpen}
         onOpenChange={setDeclineOpen}
-        title={`Decline order #${order.orderNumber}?`}
-        description="The guest's order is not made and nothing is charged. It stays in History with your reason and name."
-        reasons={DECLINE_REASONS}
-        confirmLabel="Decline order"
-        keepLabel="Go back"
+        title={t("Decline order #{orderNumber}?", { orderNumber: order.orderNumber })}
+        description={t("The guest's order is not made and nothing is charged. It stays in History with your reason and name.")}
+        reasons={DECLINE_REASONS.map((reason) => t(reason))}
+        confirmLabel={t("Decline order")}
+        keepLabel={t("Go back")}
         onSubmit={(reason) => decline.mutateAsync({ orderId: order.id, reason })}
       />
       <div className="flex items-start justify-between gap-2">
         <div>
           <p className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
             #{order.orderNumber}
-            {order.channel === "ONLINE" && <Globe className="h-3.5 w-3.5 text-muted-foreground" aria-label="Online order" />}
+            {order.channel === "ONLINE" && <Globe className="h-3.5 w-3.5 text-muted-foreground" aria-label={t("Online order")} />}
           </p>
           <p className="text-xs text-muted-foreground">
-            {order.table ? `Table ${order.table.number}` : order.type.replace("_", " ")}
+            {order.table ? t("Table {number}", { number: order.table.number }) : fmt.code(order.type)}
             {who && ` · ${who}`}
           </p>
         </div>
@@ -77,16 +81,16 @@ export function IncomingOrderCard({ order, branchId }: { order: IncomingOrder; b
           onClick={() =>
             accept.mutate(order.id, {
               onError: (err) =>
-                toast.error(err instanceof ApiError ? err.message : "Could not accept the order. Try again."),
+                toast.error(err instanceof ApiError ? err.message : t("Could not accept the order. Try again.")),
             })
           }
         >
           <Check className="h-5 w-5" aria-hidden />
-          {accept.isPending ? "Accepting…" : "Accept"}
+          {accept.isPending ? t("Accepting…") : t("Accept")}
         </Button>
         <Button variant="destructive" className="h-12 px-4" onClick={() => setDeclineOpen(true)}>
           <X className="h-5 w-5" aria-hidden />
-          Decline
+          {t("Decline")}
         </Button>
       </div>
     </Card>

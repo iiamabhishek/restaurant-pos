@@ -19,6 +19,18 @@ set -euo pipefail
 REPO_URL="https://github.com/Raktim94/nodedr-restaurant-pos.git"
 REPO_DIR="nodedr-restaurant-pos"
 SUDO=""
+os=$(uname -s)
+
+docker_reachable() {
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "$os" = "Linux" ] && sudo docker info >/dev/null 2>&1; then
+    SUDO="sudo"
+    return 0
+  fi
+  return 1
+}
 
 install_docker_linux() {
   echo "==> Installing Docker Engine via the official convenience script..."
@@ -73,34 +85,28 @@ install_docker_mac() {
   done
 }
 
-[ "$(uname -s)" = "Darwin" ] && mac_path
+[ "$os" = "Darwin" ] && mac_path
 echo "==> Checking for Docker..."
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+if docker_reachable; then
   echo "Docker is already installed and running."
 else
-  case "$(uname -s)" in
+  case "$os" in
     Darwin) install_docker_mac ;;
     Linux) install_docker_linux ;;
     *)
-      echo "Unsupported OS: $(uname -s). Install Docker manually: https://docs.docker.com/get-docker/" >&2
+      echo "Unsupported OS: $os. Install Docker manually: https://docs.docker.com/get-docker/" >&2
       exit 1
       ;;
   esac
-fi
-
-if ! docker info >/dev/null 2>&1; then
-  if [ "$(uname -s)" = "Linux" ] && sudo docker info >/dev/null 2>&1; then
-    # Just-added docker-group membership only takes effect in a fresh login
-    # shell. Falling back to sudo for this run means the install still
-    # completes in one shot instead of forcing a logout/login first.
-    SUDO="sudo"
-    echo "Using sudo for Docker for this run — log out and back in once, and future runs won't need it."
-  else
+  if ! docker_reachable; then
     echo "Docker isn't reachable yet." >&2
     echo "On Linux: log out and back in (new docker-group membership needs a fresh session), then re-run this command." >&2
     echo "On Mac: open Docker Desktop, wait for it to say \"running\", then re-run this command." >&2
     exit 1
   fi
+fi
+if [ -n "$SUDO" ]; then
+  echo "Using sudo for the OrderRestro installer. If you just joined the docker group, log out and back in for direct access."
 fi
 
 install_git_linux() {
@@ -133,7 +139,7 @@ install_git_mac() {
   brew install git <"$TTY_IN"
 }
 
-case "$(uname -s)" in
+case "$os" in
   Darwin)
     # `xcode-select -p` succeeds only when a real developer dir (CLT/Xcode) exists.
     if ! xcode-select -p >/dev/null 2>&1 && ! { command -v brew >/dev/null 2>&1 && [ -x "$(brew --prefix 2>/dev/null)/bin/git" ]; }; then
@@ -146,7 +152,7 @@ case "$(uname -s)" in
     ;;
   *)
     command -v git >/dev/null 2>&1 || {
-      echo "Unsupported OS: $(uname -s). Install git manually: https://git-scm.com/downloads" >&2
+      echo "Unsupported OS: $os. Install git manually: https://git-scm.com/downloads" >&2
       exit 1
     }
     ;;

@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Percent } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -8,11 +10,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { StatusNote, useNoteToast } from "@/components/ui/status-note";
 import { ApiError } from "@/lib/api";
-import { formatCurrency } from "@/lib/format";
 import { useBulkPrice, type BulkPriceResult, type MenuCategory } from "@/hooks/use-menu";
 
 /** Change every dish price by a percentage in one go: positive raises, negative lowers. */
 export function BulkPriceDialog({ branchId, categories }: { branchId: string | null; categories: MenuCategory[] }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [percent, setPercent] = useState("");
   const [categoryId, setCategoryId] = useState("");
@@ -29,7 +32,7 @@ export function BulkPriceDialog({ branchId, categories }: { branchId: string | n
     preview: previewOnly,
     ...(categoryId ? { categoryId } : {}),
   });
-  const fail = (e: unknown) => toast.error(e instanceof ApiError ? e.message : "Something went wrong");
+  const fail = (e: unknown) => toast.error(e instanceof ApiError ? e.message : t("Something went wrong"));
   const reset = () => {
     setPreview(null);
     clear();
@@ -49,19 +52,18 @@ export function BulkPriceDialog({ branchId, categories }: { branchId: string | n
     >
       <DialogTrigger render={<Button variant="outline" size="sm" />}>
         <Percent className="h-3.5 w-3.5" />
-        Change all prices
+        {t("Change all prices")}
       </DialogTrigger>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Change all prices</DialogTitle>
+          <DialogTitle>{t("Change all prices")}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <p className="text-sm text-muted-foreground">
-            Enter a percentage. A positive number raises prices, a negative number lowers them (for example 10 for
-            10% more, −5 for 5% less). Bills already open or paid keep the price they were rung up at.
+            {t("Enter a percentage. A positive number raises prices, a negative number lowers them (for example 10 for 10% more, −5 for 5% less). Bills already open or paid keep the price they were rung up at.")}
           </p>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="bp-percent">Percentage change</Label>
+            <Label htmlFor="bp-percent">{t("Percentage change")}</Label>
             <Input
               id="bp-percent"
               type="number"
@@ -74,11 +76,11 @@ export function BulkPriceDialog({ branchId, categories }: { branchId: string | n
                 setPercent(e.target.value);
                 reset();
               }}
-              placeholder="e.g. 10 or -5"
+              placeholder={t("e.g. 10 or -5")}
             />
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="bp-cat">Which dishes</Label>
+            <Label htmlFor="bp-cat">{t("Which dishes")}</Label>
             <select
               id="bp-cat"
               value={categoryId}
@@ -88,11 +90,9 @@ export function BulkPriceDialog({ branchId, categories }: { branchId: string | n
               }}
               className="h-10 rounded-md border bg-background px-3 text-sm"
             >
-              <option value="">All dishes</option>
+              <option value="">{t("All dishes")}</option>
               {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} only
-                </option>
+                <option key={c.id} value={c.id}>{t("{name} only", { name: c.name })}</option>
               ))}
             </select>
           </div>
@@ -106,17 +106,15 @@ export function BulkPriceDialog({ branchId, categories }: { branchId: string | n
               }}
               className="h-4 w-4"
             />
-            Round to whole rupees
+            {t("Round to whole rupees")}
           </label>
           {preview && (
             <div className="rounded-lg bg-secondary/40 px-3 py-2 text-sm">
-              <p className="font-medium text-foreground">
-                {preview.count} of {preview.total} dishes will change.
-              </p>
+              <p className="font-medium text-foreground">{t("{count} of {total} dishes will change.", { count: preview.count, total: preview.total })}</p>
               <ul className="mt-1 text-xs text-muted-foreground">
                 {preview.sample.map((s) => (
                   <li key={s.name}>
-                    {s.name}: {formatCurrency(s.before)} → {formatCurrency(s.after)}
+                    {s.name}: {fmt.currency(s.before)} → {fmt.currency(s.after)}
                   </li>
                 ))}
               </ul>
@@ -130,21 +128,21 @@ export function BulkPriceDialog({ branchId, categories }: { branchId: string | n
             disabled={!valid || bulk.isPending}
             onClick={() => bulk.mutate(dto(true), { onSuccess: setPreview, onError: fail })}
           >
-            Preview
+            {t("Preview")}
           </Button>
           <Button
             disabled={!valid || !preview || preview.count === 0 || bulk.isPending}
             onClick={() =>
               bulk.mutate(dto(false), {
                 onSuccess: (r) => {
-                  toast.success(`Updated ${r.count} dishes`);
+                  toast.success(t("Updated {count} dishes", { count: r.count }));
                   setOpen(false);
                 },
                 onError: fail,
               })
             }
           >
-            Apply to {preview?.count ?? 0} dishes
+            {t("Apply to")} {preview?.count ?? 0} {t("dishes")}
           </Button>
         </DialogFooter>
       </DialogContent>

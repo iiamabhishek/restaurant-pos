@@ -10,10 +10,6 @@ import {
 } from "@/components/ui/select";
 import { LOCALES, LOCALE_LABELS, useI18n, type Locale } from "@/lib/i18n/context";
 
-/** Small reusable language picker — used in the staff sidebar and on the
- * guest-facing QR ordering page. Swapping the locale only changes strings
- * already wired up to t(); everything else stays in English until it's
- * translated too (see lib/i18n/context.tsx). */
 export function LanguageSwitcher({ compact = false }: { compact?: boolean }) {
   const { locale, setLocale, t } = useI18n();
 

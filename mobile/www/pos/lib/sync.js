@@ -1,14 +1,16 @@
 // Keeps the phone and the restaurant server in step:
 //   pullSnapshot  server -> phone   menu, prices, tables, settings
 //   pushSales     phone -> server   every sale taken (each only ever recorded once)
-import { kv, reservations, sales } from './store.js';
+import { kv, peerSales, reservations, sales } from './store.js';
 import { mergeFromServer, toPayload } from './reservations.js';
-import { pickServer, request } from './net.js';
+import { pickServer, request, serverInfo } from './net.js';
+import { BOOK_EVENTS, SALE_EVENTS, counts, pruneSynced, pushEvents, queueEvent, DeviceRevoked, AuthExpired as EventAuthExpired } from './journal.js';
 
 export class AuthExpired extends Error {}
 
 export async function login(base, identifier, password) {
-  const r = await request(base, 'POST', '/api/v1/auth/login', { email: identifier, password });
+  const r = await request(base, 'POST', '/api/v1/auth/login', { email: identifier, password, deviceId: (await kv.get('deviceId')) || undefined });
+  if (r.status === 403 && r.data && r.data.code === 'DEVICE_REVOKED') throw new Error('The owner removed this phone from the restaurant. Ask them to allow it again.');
   if (r.status === 429) throw new Error('Too many attempts. Wait a minute and try again.');
   if (r.status !== 201 && r.status !== 200) {
     throw new Error((r.data && r.data.message) || 'That email, phone or password is not right.');
@@ -27,6 +29,7 @@ export async function pullSnapshot(base) {
   if (s.status === 403) throw new Error('This account may not take orders.');
   if (s.status !== 200) throw new Error('The server could not send the menu. Try again in a moment.');
   await kv.set('branchId', branch.id);
+  await saveServerCaps(base);
   await kv.set('snapshot', s.data);
   await kv.set('snapshotAt', Date.now());
   await mergeBookings(s.data);
@@ -36,6 +39,21 @@ export async function pullSnapshot(base) {
     /* storage blocked */
   }
   return s.data;
+}
+
+/**
+ * What this server can take from a phone (GET /mobile/server-info). Servers older than 1.38 drop add-ons, pay later
+ * and the service charge from a sale without saying so, and have nowhere to put refunds or expenses, so the phone
+ * only offers those when the server says it can. Kept with the snapshot; refreshed on every menu refresh, so updating
+ * the server switches them on at the next sync.
+ */
+async function saveServerCaps(base) {
+  try {
+    const info = await serverInfo(base);
+    if (info) await kv.set('serverCaps', { ...(info.capabilities || {}), version: info.version || 'unknown' });
+  } catch {
+    /* keep what we had */
+  }
 }
 
 const tablesOf = (snap) => ((snap && snap.floors) || []).flatMap((f) => f.tables);
@@ -83,6 +101,8 @@ export async function pushBookings(base) {
   return { sent, newer };
 }
 
+const paidAtSend = (sale) => [...sale.payments, ...(sale.collections || []).filter((c) => !c.eventId)].reduce((n, p) => n + p.amount, 0);
+
 function payload(sale) {
   return {
     id: sale.id,
@@ -91,11 +111,62 @@ function payload(sale) {
     type: sale.type,
     tableLabel: sale.tableLabel || undefined,
     note: sale.note || undefined,
-    items: sale.items.map((i) => ({ menuItemId: i.menuItemId, quantity: i.quantity, unitPrice: i.price })),
+    items: sale.items.map((i) => ({
+      menuItemId: i.menuItemId,
+      quantity: i.quantity,
+      unitPrice: i.price,
+      ...(i.modifierIds && i.modifierIds.length ? { modifierIds: i.modifierIds } : {}),
+      ...(i.portion ? { portion: i.portion } : {}),
+      ...(i.note ? { note: i.note } : {}),
+    })),
     discountPercent: sale.discountPercent || undefined,
     discountFlat: sale.discountFlat || undefined,
-    payments: sale.payments.map((p) => ({ method: p.method, amount: p.amount, tendered: p.tendered, reference: p.reference })),
+    discountReason: sale.discountReason || undefined,
+    tipAmount: sale.bill.serviceCharge || undefined,
+    customer: sale.customer && sale.customer.phone ? { phone: sale.customer.phone, ...(sale.customer.name ? { name: sale.customer.name } : {}) } : undefined,
+    takenByUserId: sale.staffServerId || undefined,
+    // Money collected before the sale reached the server goes with it; after that, each collection is its own event.
+    payments: [...sale.payments, ...(sale.collections || []).filter((c) => !c.eventId)].map((p) => ({ method: p.method, amount: p.amount, tendered: p.tendered, reference: p.reference })),
+    payLater: sale.payLater && paidAtSend(sale) < sale.bill.total - 0.004 ? true : undefined,
   };
+}
+
+/**
+ * Merge a server result into the sale as it exists *now*, not the copy we sent.
+ * A collection or "set aside" can happen while a sync is in flight; writing the
+ * sent copy back would silently delete that money. Only sync-owned fields are
+ * changed here, and any collection added after the snapshot is left untouched.
+ */
+export function applySyncResult(sent, fresh, res) {
+  const out = { ...fresh };
+  // A duplicate response means the server already has the ORIGINAL payload;
+  // it says nothing about collections added after that submission. Those stay
+  // unsent and are queued as separate events by pushSales.
+  const sentCollections = new Set(
+    res.status === 'duplicate'
+      ? (sent.syncPayloadCollections || [])
+      : (sent.collections || []).filter((c) => !c.eventId).map((c) => c.id),
+  );
+  if (Array.isArray(out.collections)) {
+    out.collections = out.collections.map((c) => (sentCollections.has(c.id) && !c.eventId ? { ...c, sentWithSale: true } : c));
+  }
+  if (res.status === 'refused') {
+    // "Set aside" is a deliberate local choice; don't silently undo it.
+    if (out.status !== 'dismissed') out.status = 'refused';
+    out.refusedReason = res.reason;
+    out.refusedCode = res.code || 'OTHER';
+  } else {
+    const review = Array.isArray(res.review) && res.review.length ? res.review : undefined;
+    if (review) out.review = review;
+    else delete out.review;
+    if (out.status !== 'dismissed') out.status = 'synced';
+    delete out.refusedReason;
+    delete out.refusedCode;
+    out.serverOrderNumber = res.orderNumber;
+    out.serverOrderId = res.orderId;
+    out.syncedAt = new Date().toISOString();
+  }
+  return out;
 }
 
 /** Put a refused sale back in the queue (e.g. after the owner restored the dish on the server). */
@@ -111,12 +182,24 @@ export async function retrySale(id) {
 export async function pushSales(base) {
   const branchId = await kv.get('branchId');
   const device = (await kv.get('deviceName')) || 'Phone';
+  const deviceId = await kv.get('deviceId');
+  const snap = await kv.get('snapshot');
+  const userId = snap?.user?.id || 'phone';
   let done = 0;
   let refused = 0;
   let reviewed = 0;
   const waiting = (await sales.pending()).reverse(); // oldest first
   for (let i = 0; i < waiting.length; i += 20) {
     const batch = waiting.slice(i, i + 20);
+    // Remember the exact collections in this submission. If the reply is lost
+    // and the sale is retried, a `duplicate` response cannot tell us which
+    // payments the server already has; this snapshot can.
+    for (const sale of batch) {
+      sale.syncPayloadCollections = (sale.collections || [])
+        .filter((c) => !c.eventId)
+        .map((c) => c.id);
+      await sales.put(sale);
+    }
     const r = await request(base, 'POST', `/api/v1/mobile/standalone/sales?branchId=${encodeURIComponent(branchId)}`, {
       deviceName: device,
       sales: batch.map(payload),
@@ -124,28 +207,96 @@ export async function pushSales(base) {
     if (r.status === 401) throw new AuthExpired();
     if (r.status !== 201 && r.status !== 200) throw new Error('The server did not accept the sales yet. They stay on this phone.');
     for (const res of r.data.results) {
-      const sale = batch.find((s) => s.id === res.id);
-      if (!sale) continue;
-      if (res.status === 'refused') {
-        sale.status = 'refused';
-        sale.refusedReason = res.reason;
-        sale.refusedCode = res.code || 'OTHER';
-        refused++;
-      } else {
-        // Recorded, but the menu moved since the phone last looked: keep what the owner should check.
-        sale.review = Array.isArray(res.review) && res.review.length ? res.review : undefined;
-        if (sale.review) reviewed++;
-        sale.status = 'synced';
-        delete sale.refusedReason;
-        delete sale.refusedCode;
-        sale.serverOrderNumber = res.orderNumber;
-        sale.syncedAt = new Date().toISOString();
+      const sent = batch.find((s) => s.id === res.id);
+      if (!sent) continue;
+      // Read/merge/write in one IndexedDB transaction: a collection saved
+      // while the request was in flight cannot be overwritten now.
+      const merged = await sales.merge(sent.id, (fresh) =>
+        applySyncResult(sent, fresh, res),
+      );
+      if (!merged) continue; // deleted on the phone while syncing
+      if (res.status === 'refused') refused++;
+      else {
+        if (merged.review) reviewed++;
         done++;
+        // Collections added after this submission were NOT accepted with the
+        // sale. Queue them as separate idempotent events instead of losing them.
+        const accepted = new Set(
+          res.status === 'duplicate'
+            ? (sent.syncPayloadCollections || [])
+            : (sent.collections || []).filter((c) => !c.eventId).map((c) => c.id),
+        );
+        for (const c of merged.collections || []) {
+          if (c.eventId || c.sentWithSale || accepted.has(c.id)) continue;
+          const ev = await queueEvent(
+            'collect',
+            {
+              saleId: merged.id,
+              payments: [
+                {
+                  method: c.method,
+                  amount: c.amount,
+                  ...(c.tendered ? { tendered: c.tendered } : {}),
+                  ...(c.reference ? { reference: c.reference } : {}),
+                },
+              ],
+            },
+            { userId, deviceId },
+          );
+          c.eventId = ev.id;
+        }
       }
-      await sales.put(sale);
+      await sales.put(merged);
     }
   }
   return { done, refused, reviewed };
+}
+
+/**
+ * Upload sales another phone handed over through Nearby. Same endpoint and same sale id as the sender's own upload,
+ * so the server records the sale once whichever phone gets there first ("duplicate" counts as done). A refusal is
+ * kept with its reason. Nothing here touches this phone's own sales.
+ */
+export async function pushPeerSales(base) {
+  const branchId = await kv.get('branchId');
+  const held = (await peerSales.all()).filter((r) => r.status === 'held');
+  let done = 0;
+  let refused = 0;
+  const byPhone = new Map();
+  for (const r of held) byPhone.set(r.from.name, [...(byPhone.get(r.from.name) || []), r]);
+  for (const [phone, rows] of byPhone) {
+    for (let i = 0; i < rows.length; i += 20) {
+      const batch = rows.slice(i, i + 20);
+      const r = await request(base, 'POST', `/api/v1/mobile/standalone/sales?branchId=${encodeURIComponent(branchId)}`, {
+        deviceName: `${phone} (via nearby phone)`,
+        sales: batch.map((row) => payload(row.sale)),
+      });
+      if (r.status === 401) throw new AuthExpired();
+      if (r.status !== 201 && r.status !== 200) throw new Error('The server did not accept the sales yet. They stay on this phone.');
+      for (const res of r.data.results) {
+        const row = batch.find((b) => b.id === res.id);
+        if (!row) continue;
+        if (res.status === 'refused') {
+          refused++;
+          await peerSales.put({ ...row, status: 'refused', reason: res.reason || 'The server refused this sale.' });
+        } else {
+          done++;
+          await peerSales.put({ ...row, status: 'synced', syncedAt: new Date().toISOString() });
+        }
+      }
+    }
+  }
+  return { done, refused };
+}
+
+// The last reachable address can be the linked restaurant's LAN or external address.
+let connection;
+export async function fetchMenuPauses(branchId) {
+  const preferred = await kv.get('serverBase');
+  if (!preferred) return null;
+  const base = connection?.preferred === preferred ? connection.base : preferred;
+  const res = await request(base, 'GET', `/api/v1/mobile/standalone/menu-pauses?branchId=${encodeURIComponent(branchId)}`);
+  return res.status === 200 && Array.isArray(res.data) ? res.data : null;
 }
 
 let running = null;
@@ -157,18 +308,79 @@ export function syncNow({ refreshMenu = true } = {}) {
     try {
       const snap = await kv.get('snapshot');
       if (snap && snap.local) return out; // on-this-phone mode: nothing to sync until a server is connected
-      const base = await pickServer(await kv.get('serverBase'));
+      const preferred = await kv.get('serverBase');
+      const base = await pickServer(preferred);
       if (!base) return out;
+      connection = { preferred, base };
       out.online = true;
-      const r = await pushSales(base);
+      // Each part is tried on its own: a sales upload that fails must not stop the kitchen records or bookings from
+      // being sent, and a refusal in one never hides what happened to the others.
+      let r = { done: 0, refused: 0, reviewed: 0 };
+      let partial = null;
+      try {
+        r = await pushSales(base);
+      } catch (e) {
+        if (e instanceof AuthExpired) throw e;
+        partial = e.message;
+      }
+      try {
+        await pushPeerSales(base); // sales a nearby phone handed over; recorded once by sale id
+      } catch (e) {
+        if (e instanceof AuthExpired) throw e;
+        partial = partial || e.message;
+      }
+      try {
+        // A refund or a collection waits until the server has its sale (it may still be waiting, or was refused).
+        if (!(await kv.get('serverCaps'))) await saveServerCaps(base); // first sync after this app update
+        const caps = (await kv.get('serverCaps')) || {};
+        const hold = async (e) => {
+          // An older server has no route for these yet: keep them waiting (not refused) until it is updated.
+          if (BOOK_EVENTS.has(e.kind) && !caps.phoneBooksSync) return true;
+          if (!SALE_EVENTS.has(e.kind)) return false;
+          const s = await sales.get(e.payload.saleId);
+          return !!s && s.status !== 'synced';
+        };
+        const ev = await pushEvents(base, await kv.get('branchId'), request, undefined, { hold });
+        out.events = ev.done;
+        out.eventsFailed = ev.failed;
+      } catch (e) {
+        if (e instanceof DeviceRevoked) {
+          out.revoked = true;
+          return out;
+        }
+        if (e instanceof EventAuthExpired) throw new AuthExpired();
+        throw e;
+      }
       out.done = r.done;
       out.refused = r.refused;
       out.reviewed = r.reviewed;
-      if (refreshMenu) await pullSnapshot(base); // also brings the server's bookings
-      const b = await pushBookings(base);
-      out.bookings = b.sent;
-      out.bookingsNewer = b.newer;
-      await kv.set('lastSync', Date.now());
+      if (refreshMenu) {
+        try {
+          await pullSnapshot(base); // also brings the server's bookings
+        } catch (e) {
+          if (e instanceof AuthExpired) throw e;
+          partial = partial || e.message;
+        }
+      }
+      try {
+        const b = await pushBookings(base);
+        out.bookings = b.sent;
+        out.bookingsNewer = b.newer;
+      } catch (e) {
+        if (e instanceof AuthExpired) throw e;
+        partial = partial || e.message;
+      }
+      try {
+        await pruneSynced();
+      } catch {
+        /* housekeeping only */
+      }
+      if (partial) {
+        out.error = partial;
+      } else {
+        await kv.set('lastSync', Date.now());
+      }
+      await heartbeat(base, !partial, out.error);
     } catch (e) {
       if (e instanceof AuthExpired) out.authExpired = true;
       else out.error = e.message;
@@ -178,4 +390,26 @@ export function syncNow({ refreshMenu = true } = {}) {
     return out;
   })();
   return running;
+}
+
+/** Tell the server this phone exists, how many things are waiting on it, and that it just synced. Never blocks selling. */
+export async function heartbeat(base, synced = false, lastError) {
+  try {
+    const c = await counts();
+    const sa = (await sales.all()).filter((s) => s.status === 'pending').length;
+    const refused = (await sales.all()).filter((s) => s.status === 'refused').length;
+    const r = await request(base, 'POST', '/api/v1/pos-devices/heartbeat', {
+      deviceId: await kv.get('deviceId'),
+      name: (await kv.get('deviceName')) || 'Phone',
+      platform: (window.Capacitor && window.Capacitor.getPlatform && window.Capacitor.getPlatform() || 'web').toUpperCase().slice(0, 20),
+      appVersion: window.__APP_VERSION__ || undefined,
+      pending: sa + c.pending,
+      failed: refused + c.failed,
+      lastError: lastError || undefined,
+      synced,
+    });
+    return r.status === 403 || (r.status === 401 && r.data && r.data.code === 'DEVICE_REVOKED') ? 'revoked' : 'ok';
+  } catch {
+    return 'offline';
+  }
 }

@@ -1,3 +1,4 @@
+import { permissionSatisfied } from '@nodedr-restaurant/types';
 import {
   effectivePermissions,
   type PermissionSource,
@@ -43,6 +44,35 @@ describe('effectivePermissions', () => {
       effectivePermissions(base([ov('DENY', 'bills.print')]), NOW),
     ).not.toContain('bills.print');
   });
+  it('DENY wins over a permission that would otherwise be implied', () => {
+    const keys = effectivePermissions(
+      {
+        role: {
+          permissions: [{ permission: { key: 'menu.manage' } }],
+        },
+        permissionOverrides: [ov('DENY', 'menu.view')],
+      },
+      NOW,
+    );
+    expect(keys).not.toContain('menu.view');
+    expect(permissionSatisfied(keys, 'menu.view')).toBe(false);
+  });
+
+  it('does not carry an expired DENY into the implied check', () => {
+    const keys = effectivePermissions(
+      {
+        role: {
+          permissions: [{ permission: { key: 'menu.manage' } }],
+        },
+        permissionOverrides: [
+          ov('DENY', 'menu.view', new Date(NOW.getTime() - 1000)),
+        ],
+      },
+      NOW,
+    );
+    expect(permissionSatisfied(keys, 'menu.view')).toBe(true);
+  });
+
   it('DENY wins over a GRANT of the same key', () => {
     const keys = effectivePermissions(
       base([ov('GRANT', 'x.y'), ov('DENY', 'x.y')]),

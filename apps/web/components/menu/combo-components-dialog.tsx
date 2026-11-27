@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Minus, Plus, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
@@ -21,7 +23,6 @@ import {
 import { useComboComponents, useSetComboComponents, type ComboComponent } from "@/hooks/use-combos";
 import type { MenuItem } from "@/hooks/use-menu";
 import { ApiError } from "@/lib/api";
-import { formatCurrency } from "@/lib/format";
 
 interface Row {
   componentItemId: string;
@@ -45,6 +46,8 @@ function ComboRowsEditor({
   branchId: string | null;
   onSaved: () => void;
 }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const [rows, setRows] = useState<Row[]>(() =>
     existing.map((c) => ({ componentItemId: c.componentItemId, quantity: c.quantity })),
   );
@@ -69,11 +72,11 @@ function ComboRowsEditor({
       { components: rows },
       {
         onSuccess: () => {
-          toast.success(`Combo components saved for ${item.name}`);
+          toast.success(t("Combo components saved for {name}", { name: item.name }));
           onSaved();
         },
         onError: (err) =>
-          toast.error(err instanceof ApiError ? err.message : "Could not save combo components"),
+          toast.error(err instanceof ApiError ? err.message : t("Could not save combo components")),
       },
     );
   };
@@ -83,8 +86,7 @@ function ComboRowsEditor({
       <div className="flex flex-col gap-3 py-2">
         {rows.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            No components yet — this item sells as a regular menu item. Add components to make it
-            a combo.
+            {t("No components yet — this item sells as a regular menu item. Add components to make it a combo.")}
           </p>
         )}
         {rows.map((row, index) => (
@@ -99,7 +101,7 @@ function ComboRowsEditor({
               <SelectContent>
                 {candidates.map((c) => (
                   <SelectItem key={c.id} value={c.id}>
-                    {c.name} ({formatCurrency(c.price)})
+                    {c.name} ({fmt.currency(c.price)})
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -140,13 +142,13 @@ function ComboRowsEditor({
           disabled={rows.length >= candidates.length}
           onClick={addRow}
         >
-          Add component
+          {t("Add component")}
         </Button>
       </div>
 
       <DialogFooter>
         <Button disabled={setComponents.isPending} onClick={handleSave}>
-          {setComponents.isPending ? "Saving…" : "Save combo"}
+          {setComponents.isPending ? t("Saving…") : t("Save combo")}
         </Button>
       </DialogFooter>
     </>
@@ -166,13 +168,14 @@ export function ComboComponentsDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useI18n();
   const { data: existing } = useComboComponents(branchId, item?.id ?? null);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{item?.name} — combo components</DialogTitle>
+          <DialogTitle>{t("{name} — combo components", { name: (item?.name) ?? "" })}</DialogTitle>
         </DialogHeader>
 
         {item && existing ? (
@@ -185,7 +188,7 @@ export function ComboComponentsDialog({
             onSaved={() => onOpenChange(false)}
           />
         ) : (
-          <p className="py-8 text-center text-sm text-muted-foreground">Loading…</p>
+          <p className="py-8 text-center text-sm text-muted-foreground">{t("Loading…")}</p>
         )}
       </DialogContent>
     </Dialog>

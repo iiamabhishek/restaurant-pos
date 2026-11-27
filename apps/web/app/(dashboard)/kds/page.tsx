@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import type { KotStatusDto } from "@nodedr-restaurant/types";
 import { useEffect, useSyncExternalStore } from "react";
 import { CloudOff } from "lucide-react";
@@ -30,6 +32,8 @@ const COLUMNS: { status: KotStatusDto; label: string }[] = [
 ];
 
 export default function KdsPage() {
+  const fmt = useStaffFormat();
+  const { t: translate } = useI18n();
   const { branchId } = useBranch();
   const { data: me } = useCurrentUser();
   const canAnswer = hasPermission(me?.user, "orders.accept");
@@ -56,16 +60,16 @@ export default function KdsPage() {
     <div className="flex min-h-[calc(100dvh-10rem)] flex-col gap-4 lg:h-[calc(100dvh-8rem)]">
       <div>
         <h1 className="text-2xl font-semibold sm:text-[32px] tracking-tight text-foreground">
-          Kitchen Display
+          {translate("Kitchen Display")}
         </h1>
-        <p className="text-sm text-muted-foreground">Live order tickets by station</p>
+        <p className="text-sm text-muted-foreground">{translate("Live order tickets by station")}</p>
       </div>
 
       <LiveStatus />
 
       {stations && stations.length > 0 && (
-        <div role="group" aria-label="Station" className="flex flex-wrap gap-2">
-          {[{ id: "", name: "All stations" }, ...stations].map((s) => (
+        <div role="group" aria-label={translate("Station")} className="flex flex-wrap gap-2">
+          {[{ id: "", name: translate("All stations") }, ...stations].map((s) => (
             <button
               key={s.id || "all"}
               type="button"
@@ -86,12 +90,12 @@ export default function KdsPage() {
 
       {stale && (
         <p role="status" className="text-xs text-warning">
-          The station saved on this screen no longer exists, so all stations are shown. Pick a station to pin it.
+          {translate("The station saved on this screen no longer exists, so all stations are shown. Pick a station to pin it.")}
         </p>
       )}
       {pref.saveFailed && (
         <p role="alert" className="text-xs text-destructive">
-          This browser blocked saving the choice, so it will reset when the page reloads.
+          {translate("This browser blocked saving the choice, so it will reset when the page reloads.")}
         </p>
       )}
 
@@ -102,9 +106,9 @@ export default function KdsPage() {
           <CloudOff className="h-4 w-4 shrink-0" aria-hidden />
           <span className="min-w-0 flex-1">
             {showingSaved
-              ? `No connection. Showing tickets from ${new Date(tickets.dataUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. You can keep moving tickets along; printing and rejecting need the connection.`
-              : "Sending saved changes…"}
-            {waiting > 0 ? ` ${waiting} change${waiting === 1 ? "" : "s"} saved on this phone.` : ""}
+              ? translate("No connection. Showing tickets from {toLocaleTimeString}. You can keep moving tickets along; printing and rejecting need the connection.", { toLocaleTimeString: new Date(tickets.dataUpdatedAt).toLocaleTimeString(fmt.localeTag, { hour: "2-digit", minute: "2-digit" }) })
+              : translate("Sending saved changes…")}
+            {waiting > 0 ? (waiting === 1 ? translate(" {waiting} change saved on this phone.", { waiting }) : translate(" {waiting} changes saved on this phone.", { waiting })) : ""}
           </span>
           <Button
             type="button"
@@ -112,27 +116,25 @@ export default function KdsPage() {
             className="h-9"
             onClick={() => void flushOutbox().then(() => tickets.refetch())}
           >
-            Send now
+            {translate("Send now")}
           </Button>
         </div>
       )}
       {refused && (
         <div role="alert" className="flex items-start gap-2 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
           <span className="min-w-0 flex-1 whitespace-pre-line">
-            The server did not accept {refused.split("\n").length === 1 ? "a saved change" : "some saved changes"}:{"\n"}
+            {translate("The server did not accept")} {refused.split("\n").length === 1 ? translate("a saved change") : translate("some saved changes")}:{"\n"}
             {refused}
           </span>
           <Button type="button" variant="outline" className="h-9" onClick={() => outbox.clearRefused()}>
-            Dismiss
+            {translate("Dismiss")}
           </Button>
         </div>
       )}
 
       {pendingOrders.length > 0 && (
-        <section aria-label="Incoming orders" className="flex flex-col gap-2">
-          <h2 className="text-sm font-semibold text-foreground">
-            Incoming - needs a decision{" "}
-            <span className="ml-1 rounded-full bg-destructive px-2 py-0.5 text-xs text-white">{pendingOrders.length}</span>
+        <section aria-label={translate("Incoming orders")} className="flex flex-col gap-2">
+          <h2 className="text-sm font-semibold text-foreground">{translate("Incoming - needs a decision")} <span className="ml-1 rounded-full bg-destructive px-2 py-0.5 text-xs text-destructive-foreground">{pendingOrders.length}</span>
           </h2>
           <div className="flex gap-3 overflow-x-auto pb-2">
             {pendingOrders.map((order) => (
@@ -143,7 +145,7 @@ export default function KdsPage() {
       )}
       {canAnswer && incoming.isError && (
         <p role="alert" className="text-xs text-destructive">
-          Could not check for incoming orders. They will show here once the connection is back.
+          {translate("Could not check for incoming orders. They will show here once the connection is back.")}
         </p>
       )}
 
@@ -152,7 +154,7 @@ export default function KdsPage() {
       {tickets.isError && !tickets.data ? (
         <QueryError
           error={tickets.error}
-          what="the kitchen tickets"
+          what={translate("the kitchen tickets")}
           onRetry={() => void tickets.refetch()}
           retrying={tickets.isFetching}
         />
@@ -161,7 +163,7 @@ export default function KdsPage() {
           {COLUMNS.map((col) => (
             <div key={col.status} className="flex w-[85%] shrink-0 snap-center flex-col gap-3 overflow-hidden rounded-2xl bg-secondary/40 p-3 sm:w-auto sm:shrink">
               <div className="flex items-center justify-between px-1">
-                <h2 className="text-sm font-semibold text-foreground">{col.label}</h2>
+                <h2 className="text-sm font-semibold text-foreground">{translate(col.label)}</h2>
                 <span className="text-xs font-medium text-muted-foreground">
                   {byStatus(col.status).length}
                 </span>
@@ -175,7 +177,7 @@ export default function KdsPage() {
                   <TicketCard key={ticket.id} ticket={ticket} branchId={branchId} />
                 ))}
                 {canFetch && !tickets.isLoading && byStatus(col.status).length === 0 && (
-                  <p className="py-6 text-center text-xs text-muted-foreground">No tickets</p>
+                  <p className="py-6 text-center text-xs text-muted-foreground">{translate("No tickets")}</p>
                 )}
               </div>
             </div>

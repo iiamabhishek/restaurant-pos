@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BellRing, Receipt } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,7 @@ interface TableRequestRow {
 
 /** Guest "call waiter" / "request bill" taps from the table QR page. */
 export function TableRequestsBar({ branchId }: { branchId: string | null }) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   const { data } = useQuery({
     queryKey: ["table-requests", branchId],
@@ -33,11 +35,11 @@ export function TableRequestsBar({ branchId }: { branchId: string | null }) {
         <div key={r.id} className="flex items-center justify-between gap-3 text-sm">
           <span className="flex items-center gap-2 text-foreground">
             {r.type === "BILL" ? <Receipt className="h-4 w-4" /> : <BellRing className="h-4 w-4" />}
-            {r.table.name ?? `Table ${r.table.number}`} —{" "}
-            {r.type === "BILL" ? "wants the bill" : "needs a waiter"}
+            {r.table.name ?? t("Table {number}", { number: r.table.number })} —{" "}
+            {r.type === "BILL" ? t("wants the bill") : t("needs a waiter")}
           </span>
           <Button size="sm" variant="outline" disabled={resolve.isPending} onClick={() => resolve.mutate(r.id)}>
-            Done
+            {t("Done")}
           </Button>
         </div>
       ))}

@@ -1,23 +1,14 @@
 "use client";
 
-// Lightweight client-side i18n (2026-09-27) — no routing/middleware
-// involved, since this dashboard is a client-rendered SPA-style app and
-// the QR ordering page is the one page a guest actually reads in their
-// own language. A locale is just a piece of client state, persisted to
-// localStorage so it survives a refresh, with a small dictionary lookup.
-//
-// Extending this: add a namespaced key (e.g. "menu.addItem") to every file
-// in ./dictionaries, then call t("menu.addItem") wherever the English
-// literal used to be. See nav-items.ts / sidebar-nav.tsx and
-// app/order/[qrToken]/page.tsx for the two places this is wired up so far.
-
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { DEFAULT_LOCALE, isLocale, type Locale } from "./locales";
+import { formatMessage, type MessageValues } from "./message";
 import en from "./dictionaries/en.json";
 import es from "./dictionaries/es.json";
 import fr from "./dictionaries/fr.json";
+import pt from "./dictionaries/pt.json";
 
-const DICTIONARIES: Record<Locale, Record<string, string>> = { en, es, fr };
+const DICTIONARIES: Record<Locale, Record<string, string>> = { en, es, fr, pt };
 const STORAGE_KEY = "nodedr-locale";
 
 function detectBrowserLocale(): Locale {
@@ -29,10 +20,12 @@ function detectBrowserLocale(): Locale {
   return DEFAULT_LOCALE;
 }
 
+export type Translate = (key: string, vars?: MessageValues) => string;
+
 interface I18nContextValue {
   locale: Locale;
   setLocale: (locale: Locale) => void;
-  t: (key: string, vars?: Record<string, string | number>) => string;
+  t: Translate;
 }
 
 const I18nContext = createContext<I18nContextValue | null>(null);
@@ -71,20 +64,29 @@ export function I18nProvider({
     [fixedLocale],
   );
 
-  const t = useCallback(
-    (key: string, vars?: Record<string, string | number>) => {
-      const template = DICTIONARIES[locale][key] ?? DICTIONARIES[DEFAULT_LOCALE][key] ?? key;
-      if (!vars) return template;
-      return Object.entries(vars).reduce(
-        (out, [name, value]) => out.replaceAll(`{${name}}`, String(value)),
-        template,
-      );
-    },
-    [locale],
-  );
+  return <LocaleMessages locale={locale} setLocale={setLocale}>{children}</LocaleMessages>;
+}
 
-  const value = useMemo(() => ({ locale, setLocale, t }), [locale, setLocale, t]);
-
+// A staff route can supply its larger catalog while sharing the picker and its saved preference.
+export function LocaleMessages({
+  children, locale, setLocale, messages,
+}: {
+  children: React.ReactNode;
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+  messages?: Record<string, string>;
+}) {
+  const value = useMemo<I18nContextValue>(() => {
+    const dictionary = DICTIONARIES[locale];
+    const english = DICTIONARIES[DEFAULT_LOCALE];
+    const t = (key: string, vars?: MessageValues) => {
+      const source = messages && Object.hasOwn(messages, key) ? messages[key]
+        : Object.hasOwn(dictionary, key) ? dictionary[key]
+        : Object.hasOwn(english, key) ? english[key] : key;
+      return formatMessage(source, vars);
+    };
+    return { locale, setLocale, t };
+  }, [locale, setLocale, messages]);
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 

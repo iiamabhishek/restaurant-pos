@@ -31,11 +31,22 @@ Without a server the phone keeps its own account, menu and sales (`www/pos/`). I
 
 - **Tables**: sections and tables (add/remove), free/occupied tiles with running total and minutes, open and held orders, one open order per table (a second order on a taken table is refused, never merged).
 - **Orders saved as you go**: the cart is an order saved to the phone after every change; a crash or restart brings it back. Hold, resume, per-dish notes, cancel with a reason (kept as a record).
+- **Interrupted checkout**. Reopen the order and choose **Finish saved sale** to complete the original bill. Choose **Edit payment details** to correct the recorded tender or customer. [Phone payment recovery](../docs/MOBILE-FAILURE-MODES.md#recover-a-payment-on-the-phone-pos)
 - **KOT**: "Send to kitchen" prints only what is new since the last ticket, and a CANCEL ticket if a sent dish was removed. The ticket and the order's "sent" state are saved in one transaction. Print failure is shown honestly and the ticket stays on the Kitchen screen for a retry; reprints are marked REPRINT.
 - **Kitchen screen** for this phone: New, Preparing, Ready, Served, with minutes waiting.
 - **Today** report on the Sales tab (sales, cash/UPI/card, tax, discounts, top dishes, cancelled orders).
 
-Open orders, tables and kitchen tickets are on that phone only; only paid sales go to the server (item notes travel in the sale note). A shared kitchen display and shared tables across phones need the server's own web app.
+Open orders, tables and kitchen tickets are on that phone only. A shared kitchen display and shared tables across phones need the server: run it on a restaurant computer (the Windows app's "main computer" mode, or Docker) and point every phone at its local address. That works with no internet, only the restaurant WiFi.
+
+### Selling (1.38)
+
+- **Half portions and add-ons**: dishes with a half price or option groups open an options sheet (required groups, min/max). Each dish + portion + add-ons combination is its own line, priced from the menu, and reaches the server as the same modifiers and portion (`apps/backend/src/standalone/offline-lines.ts`). Only combos still need the full app.
+- **Barcodes**: type or scan a barcode/SKU in the search box and press Enter (USB and Bluetooth scanners work as keyboards), or tap Scan to use the camera.
+- **Customer and pay later**: name and phone on the bill; with a phone number the rest can be left owed. Sales > Money owed lists who owes what; Collect payment records it (part or all, change for cash). On the server the order stays open with its balance until paid.
+- **Voluntary service charge**: set a % under Sync > Shop settings. It is never added by itself: the cashier ticks it only when the guest agrees (India's CCPA guidelines do not allow a compulsory one). It is not taxed and reaches the server as a tip.
+- **Staff PINs**: Sync > Shop settings > Staff & PINs. Each person switches in with a 4-8 digit PIN (salted PBKDF2 hash, never leaves the phone; 5 wrong tries lock the pad, doubling). Every bill records who took it (the server books it to that person). Discounts, refunds, pay later, cancelling dishes the kitchen has, expenses deleted, closing the day, menu changes and restoring a backup need a manager's PIN. Optional idle lock. Server-linked phones list the server's staff; a phone account adds its own people.
+
+**Older servers.** The phone reads `GET /api/v1/mobile/server-info` capabilities on every menu refresh (`serverCaps`). Without `offlineOptions` (servers before 1.38, which strip unknown sale fields) it hides pay later and the service charge; without `phoneBooksSync` refunds, expenses, collections and cash counts stay pending on the phone (not refused) until the server is updated. The Sync tab says so.
 
 Tests: `node --test www/pos/lib/*.test.mjs`.
 
@@ -43,13 +54,14 @@ Tests: `node --test www/pos/lib/*.test.mjs`.
 
 With no server the app opens its own POS (`www/pos/`): menu, selling, tables and held orders, kitchen tickets and the kitchen screen, Bluetooth and PDF printing, and sync to a server later. Everything is kept in the phone's IndexedDB (`lib/store.js`).
 
-Books (`lib/books.js`, unit tested in `lib/books.test.mjs`), all kept on the phone and never sent to a server:
+Books (`lib/books.js`, unit tested in `lib/books.test.mjs`). On a phone account they stay on the phone. On a server-linked phone, refunds (money only), expenses, money collected on owed bills and the phone's own day-end cash count are also sent to the server through the event queue (`lib/journal.js`, each with its own id so a resend is harmless; a refund or collection waits until its sale is on the server). The cash counts appear in the web app under Accounting > Cash close > Phone tills.
 
 - **Refunds** on a sale, by dish and quantity. The sale total (after any discount) is shared across lines by tax-inclusive price; the last refund takes exactly what is left, so the total refunded never exceeds what was paid.
 - **Expenses**, from the cash drawer or other.
 - **Close the day**: opening cash + cash sales - cash refunds - cash expenses = expected cash, compared with the cash counted.
 - **Reports** for today, 7 and 30 days.
 - **Stock**: an optional count per dish; counted dishes count down with each sale and switch off at 0. "Sold out" can also be set by hand.
+- **Automatic backup**: once a day (and after closing the day) the whole phone is saved to `Download/OrderRestro` on the phone (MediaStore, no permission; it survives clearing or uninstalling the app; the newest 7 are kept). Android 7-9 keep it in the app's own folder instead. It never contains the password or staff PINs.
 - **Export and backup**: sales and expenses as CSV (formula characters are neutralised), the whole phone as one JSON backup that restores all-or-nothing and never contains the password. Files go out through Android's share sheet (`NativePrinter.shareFile`, via the FileProvider, no storage permission).
 
 Tests: `node --test www/pos/lib/*.test.mjs`.
@@ -104,3 +116,14 @@ Source images are in `resources/`. To regenerate every size (the tool is not a p
 ```bash
 npx @capacitor/assets generate --android --ios --iconBackgroundColor '#9f1239' --splashBackgroundColor '#9f1239' --splashBackgroundColorDark '#141110'
 ```
+
+
+## Stock journal on the phone (1.40)
+
+Kitchen tab > **Stock journal: record production**: product-first voucher with saved recipes (and "No saved recipes for this product yet"), fill from recipe,
+stock on hand per ingredient, separate **Add inventory item** / **Add menu item**, review, post (kept on the phone and sent once if offline), save draft,
+save as recipe, and **Drafts and posted vouchers**. All rules stay on the server; see `../docs/STOCK-JOURNAL.md`. Code: `www/pos/lib/stockjournal.js`
+(tested in `stockjournal.test.mjs`) and the "stock journal" section of `www/pos/pos.js`.
+
+Release prep: `versionName 1.47.0` / `versionCode 147000`. `npm run android:release` builds the bundle; signing uses `keystore.properties` or
+`ORDERRESTRO_KEYSTORE_PROPERTIES` as before. Nothing is submitted by the build.

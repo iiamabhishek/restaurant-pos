@@ -218,7 +218,18 @@ export interface RefundToReview {
   currency: string;
   note: string | null;
   providerRefundId: string | null;
+  hasLocalRefund: boolean;
+  status: string;
   createdAt: string;
+}
+
+export function useResolveRefund() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { id: string; outcome: "NOT_REFUNDED_AT_PROVIDER" | "SETTLED_OUTSIDE_GATEWAY"; note: string }) =>
+      api.post(`/payment-gateways/refunds/${v.id}/resolve`, { outcome: v.outcome, note: v.note }),
+    onSettled: () => void qc.invalidateQueries({ queryKey: KEY }),
+  });
 }
 
 export function useRefundsToReview() {

@@ -22,11 +22,22 @@ const clockInSchema = z.object({
 });
 const clockOutSchema = z.object({
   note: z.string().trim().max(200).optional(),
+  // Unpaid break taken during the shift, in minutes.
+  breakMinutes: z.coerce.number().int().min(0).max(480).optional(),
+});
+const eventSchema = z.object({
+  type: z.enum(['IN', 'OUT']),
+  at: z.coerce.date(),
+  branchId: z.string().min(1),
+  idempotencyKey: z.string().trim().min(8).max(120),
+  breakMinutes: z.coerce.number().int().min(0).max(480).optional(),
+  note: z.string().trim().max(200).optional(),
 });
 const correctionSchema = z
   .object({
     clockInAt: z.coerce.date().optional(),
     clockOutAt: z.union([z.coerce.date(), z.null()]).optional(),
+    breakMinutes: z.coerce.number().int().min(0).max(480).optional(),
     note: z.string().trim().max(200).optional(),
     reason: z
       .string()
@@ -68,6 +79,17 @@ export class AttendanceController {
     return this.attendance.clockIn(user.id, body.branchId, body.note);
   }
 
+  // A clock-in/out recorded on a phone while offline, sent later with the time it really happened.
+  @Auth()
+  @Post('events')
+  async event(
+    @CurrentUser() user: SessionUser,
+    @Body(new ZodValidationPipe(eventSchema)) body: z.infer<typeof eventSchema>,
+  ) {
+    await this.branchAccess.assertAccess(user.restaurantId, body.branchId);
+    return this.attendance.recordEvent(user.id, user.restaurantId, body);
+  }
+
   @Auth()
   @Post('clock-out')
   clockOut(
@@ -75,7 +97,7 @@ export class AttendanceController {
     @Body(new ZodValidationPipe(clockOutSchema))
     body: z.infer<typeof clockOutSchema>,
   ) {
-    return this.attendance.clockOut(user.id, body.note);
+    return this.attendance.clockOut(user.id, body.note, body.breakMinutes);
   }
 
   @Auth('attendance.manage')

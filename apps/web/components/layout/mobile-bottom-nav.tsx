@@ -40,7 +40,7 @@ export function MobileBottomNav({
 
   return (
     <nav
-      aria-label="Primary"
+      aria-label={t("Primary")}
       className="fixed inset-x-0 bottom-0 z-30 flex border-t border-border bg-background/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden"
     >
       {primary.map((item) => {
@@ -71,7 +71,7 @@ export function MobileBottomNav({
         className={cn(itemClass, "h-16 text-muted-foreground active:text-foreground")}
       >
         <MoreHorizontal className="h-5 w-5" />
-        <span>More</span>
+        <span>{t("More")}</span>
       </button>
     </nav>
   );

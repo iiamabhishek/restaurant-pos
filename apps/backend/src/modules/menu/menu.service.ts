@@ -1,21 +1,38 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import type {
   MenuCategoryDto,
   MenuItemDto,
+  MenuItemPauseDto,
   ModifierGroupDto,
 } from '@nodedr-restaurant/types';
 import { AuditService } from '../../audit/audit.service';
+import { BranchTimeService } from '../../common/services/branch-time.service';
+import { nextLocalTime } from '../../common/time';
+import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import { PrismaService } from '../../prisma/prisma.service';
+
+// Options that are still on the menu. A removed option that past orders used is kept (hidden), not deleted.
+const ACTIVE_MODIFIERS = {
+  modifiers: {
+    where: { isActive: true },
+    orderBy: { sortOrder: 'asc' as const },
+  },
+  // How many menu items use the group, so the menu screen can warn that editing a shared group changes them all.
+  _count: { select: { menuItems: true } },
+} as const;
 
 @Injectable()
 export class MenuService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly branchTime: BranchTimeService,
+    private readonly realtime: RealtimeGateway,
   ) {}
 
   // --- Categories ---------------------------------------------------------
@@ -75,8 +92,10 @@ export class MenuService {
       include: {
         category: true,
         station: true,
+        // The POS matches scanned barcodes against this too.
+        stockIngredient: { select: { sku: true } },
         modifierGroups: {
-          include: { modifierGroup: { include: { modifiers: true } } },
+          include: { modifierGroup: { include: ACTIVE_MODIFIERS } },
         },
       },
     });
@@ -87,7 +106,7 @@ export class MenuService {
       where: { id, branchId },
       include: {
         modifierGroups: {
-          include: { modifierGroup: { include: { modifiers: true } } },
+          include: { modifierGroup: { include: ACTIVE_MODIFIERS } },
         },
       },
     });
@@ -117,10 +136,11 @@ export class MenuService {
     branchId: string,
     id: string,
     userId: string,
-    dto: Partial<MenuItemDto>,
+    dto: Partial<MenuItemDto> & { pausedUntil?: unknown },
   ) {
     const existing = await this.getItem(branchId, id);
-    const { modifierGroupIds, ...rest } = dto;
+    // Editors may send an entire cached item. Only the pause endpoint changes the pause.
+    const { modifierGroupIds, pausedUntil: _pause, ...rest } = dto; // eslint-disable-line @typescript-eslint/no-unused-vars
     if (modifierGroupIds) {
       await this.assertModifierGroupsInBranch(branchId, modifierGroupIds);
     }
@@ -161,6 +181,47 @@ export class MenuService {
     return updated;
   }
 
+  async setItemPause(
+    branchId: string,
+    id: string,
+    userId: string,
+    dto: MenuItemPauseDto,
+  ) {
+    let pausedUntil: Date | null = null;
+    if ('minutes' in dto) {
+      pausedUntil = new Date(Date.now() + dto.minutes * 60_000);
+    } else if ('localTime' in dto) {
+      const timezone = await this.branchTime.tzForBranch(branchId);
+      pausedUntil = nextLocalTime(new Date(), timezone, dto.localTime);
+    }
+
+    const item = await this.prisma.$transaction(async (tx) => {
+      const [updated] = await tx.menuItem.updateManyAndReturn({
+        where: { id, branchId, ...(pausedUntil && { isActive: true }) },
+        data: { pausedUntil },
+      });
+      if (!updated)
+        throw new NotFoundException('Menu item unavailable in this branch');
+      await this.audit.record(
+        {
+          userId,
+          action: pausedUntil ? 'menu_item.paused' : 'menu_item.resumed',
+          entity: 'MenuItem',
+          entityId: id,
+          metadata: {
+            branchId,
+            name: updated.name,
+            pausedUntil: pausedUntil?.toISOString() ?? null,
+          },
+        },
+        tx,
+      );
+      return updated;
+    });
+    this.realtime.emitToBranch(branchId, 'menu.updated', { id });
+    return item;
+  }
+
   /**
    * Raise or lower every dish price by a percentage (negative = cheaper).
    * `preview` returns what would change without writing anything. Paid and
@@ -169,7 +230,12 @@ export class MenuService {
   async bulkPriceChange(
     branchId: string,
     userId: string,
-    input: { percent: number; categoryId?: string; roundToWhole: boolean; preview: boolean },
+    input: {
+      percent: number;
+      categoryId?: string;
+      roundToWhole: boolean;
+      preview: boolean;
+    },
   ) {
     const { percent, categoryId, roundToWhole, preview } = input;
     const items = await this.prisma.menuItem.findMany({
@@ -188,13 +254,18 @@ export class MenuService {
       halfBefore: i.halfPrice == null ? null : Number(i.halfPrice),
       halfAfter: i.halfPrice == null ? null : move(Number(i.halfPrice)),
     }));
-    const changed = changes.filter((c) => c.before !== c.after || c.halfBefore !== c.halfAfter);
+    const changed = changes.filter(
+      (c) => c.before !== c.after || c.halfBefore !== c.halfAfter,
+    );
     if (!preview && changed.length > 0) {
       await this.prisma.$transaction(
         changed.map((c) =>
           this.prisma.menuItem.update({
             where: { id: c.id },
-            data: { price: c.after, ...(c.halfAfter != null ? { halfPrice: c.halfAfter } : {}) },
+            data: {
+              price: c.after,
+              ...(c.halfAfter != null ? { halfPrice: c.halfAfter } : {}),
+            },
           }),
         ),
       );
@@ -203,14 +274,21 @@ export class MenuService {
         action: 'menu_item.bulk_price_changed',
         entity: 'MenuItem',
         entityId: branchId,
-        metadata: { percent, categoryId: categoryId ?? null, roundToWhole, count: changed.length },
+        metadata: {
+          percent,
+          categoryId: categoryId ?? null,
+          roundToWhole,
+          count: changed.length,
+        },
       });
     }
     return {
       applied: !preview,
       count: changed.length,
       total: items.length,
-      sample: changed.slice(0, 5).map((c) => ({ name: c.name, before: c.before, after: c.after })),
+      sample: changed
+        .slice(0, 5)
+        .map((c) => ({ name: c.name, before: c.before, after: c.after })),
     };
   }
 
@@ -231,8 +309,54 @@ export class MenuService {
 
   async deleteItem(branchId: string, id: string) {
     await this.getItem(branchId, id);
-    await this.prisma.menuItem.delete({ where: { id } });
-    return { ok: true };
+
+    // 1. Check if this menu item is linked in past order history
+    const orderedCount = await this.prisma.orderItem.count({
+      where: { menuItemId: id },
+    });
+
+    if (orderedCount > 0) {
+      // Historical orders reference this item! We must NOT hard-delete it because
+      // that would break sales history and receipts. Soft-delete by marking inactive instead.
+      await this.prisma.menuItem.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      return { ok: true, softDeleted: true };
+    }
+
+    // 2. Unordered item (e.g. newly created or accidental stock item):
+    // Safely remove combo references and delete
+    await this.prisma.$transaction(async (tx) => {
+      // Find parent combos where this item was a component
+      const parentCombos = await tx.comboComponent.findMany({
+        where: { componentItemId: id },
+        select: { comboItemId: true },
+      });
+
+      // Clean up combo child references if any
+      await tx.comboComponent.deleteMany({
+        where: { OR: [{ comboItemId: id }, { componentItemId: id }] },
+      });
+
+      // Clear isCombo on combos that now have 0 components
+      for (const parent of parentCombos) {
+        const remaining = await tx.comboComponent.count({
+          where: { comboItemId: parent.comboItemId },
+        });
+        if (remaining === 0) {
+          await tx.menuItem.update({
+            where: { id: parent.comboItemId },
+            data: { isCombo: false },
+          });
+        }
+      }
+
+      // Delete the menu item (cascades recipeLines, modifierGroups, costing)
+      await tx.menuItem.delete({ where: { id } });
+    });
+
+    return { ok: true, softDeleted: false };
   }
 
   // --- Modifier groups --------------------------------------------------------
@@ -240,18 +364,40 @@ export class MenuService {
   listModifierGroups(branchId: string) {
     return this.prisma.modifierGroup.findMany({
       where: { branchId },
-      include: { modifiers: true },
+      orderBy: { name: 'asc' },
+      include: ACTIVE_MODIFIERS,
     });
   }
 
   createModifierGroup(branchId: string, dto: ModifierGroupDto) {
     const { modifiers, ...rest } = dto;
+    this.assertGroupShape(rest);
     return this.prisma.modifierGroup.create({
-      data: { ...rest, branchId, modifiers: { create: modifiers } },
-      include: { modifiers: true },
+      data: {
+        ...rest,
+        branchId,
+        // A new group never takes ids from the client; order is the order given.
+        modifiers: {
+          create: modifiers.map((m, i) => ({
+            name: m.name,
+            priceAdjustment: m.priceAdjustment,
+            taxRatePercent: m.taxRatePercent,
+            kitchenNote: m.kitchenNote,
+            isDefault: m.isDefault,
+            sortOrder: i,
+          })),
+        },
+      },
+      include: ACTIVE_MODIFIERS,
     });
   }
 
+  /**
+   * Edit a group IN PLACE. Options sent with an id are updated (so past orders keep pointing at them), options without one
+   * are added, and options left out are removed: deleted if nothing ever used them, otherwise hidden (isActive false),
+   * because order history references them. The old version deleted and re-created every option, which failed as soon as
+   * any option had ever been ordered and dropped each option's stock links.
+   */
   async updateModifierGroup(
     branchId: string,
     id: string,
@@ -260,25 +406,85 @@ export class MenuService {
     await this.assertModifierGroupInBranch(branchId, id);
 
     const { modifiers, ...rest } = dto;
+    if (Object.keys(rest).length) {
+      const current = await this.prisma.modifierGroup.findUniqueOrThrow({
+        where: { id },
+      });
+      this.assertGroupShape({ ...current, ...rest });
+    }
     return this.prisma.$transaction(async (tx) => {
       if (modifiers) {
-        await tx.modifier.deleteMany({ where: { groupId: id } });
-        await tx.modifier.createMany({
-          data: modifiers.map((m) => ({ ...m, groupId: id })),
+        const current = await tx.modifier.findMany({
+          where: { groupId: id, isActive: true },
         });
+        const known = new Set(current.map((m) => m.id));
+        for (const m of modifiers) {
+          if (m.id && !known.has(m.id))
+            throw new BadRequestException(
+              'One of those options does not belong to this group',
+            );
+        }
+        const keep = new Set(modifiers.flatMap((m) => (m.id ? [m.id] : [])));
+        for (const [i, m] of modifiers.entries()) {
+          const { id: optionId, ...data } = m;
+          if (optionId)
+            await tx.modifier.update({
+              where: { id: optionId },
+              data: { ...data, sortOrder: i },
+            });
+          else
+            await tx.modifier.create({
+              data: { ...data, sortOrder: i, groupId: id },
+            });
+        }
+        for (const gone of current.filter((m) => !keep.has(m.id))) {
+          const used = await tx.orderItemModifier.count({
+            where: { modifierId: gone.id },
+          });
+          if (used > 0)
+            await tx.modifier.update({
+              where: { id: gone.id },
+              data: { isActive: false, isDefault: false },
+            });
+          else await tx.modifier.delete({ where: { id: gone.id } });
+        }
       }
       return tx.modifierGroup.update({
         where: { id },
         data: rest,
-        include: { modifiers: true },
+        include: ACTIVE_MODIFIERS,
       });
     });
   }
 
   async deleteModifierGroup(branchId: string, id: string) {
     await this.assertModifierGroupInBranch(branchId, id);
+    const used = await this.prisma.orderItemModifier.count({
+      where: { modifier: { groupId: id } },
+    });
+    if (used > 0) {
+      throw new ConflictException(
+        'This option group has been ordered before, so it is kept for the order history. Remove it from the menu items instead.',
+      );
+    }
     await this.prisma.modifierGroup.delete({ where: { id } });
     return { ok: true };
+  }
+
+  /** "Choose up to" must be at least "must choose": a group nobody can satisfy would block every order of the item. */
+  private assertGroupShape(g: {
+    minSelect?: number;
+    maxSelect?: number;
+    isRequired?: boolean;
+  }) {
+    const min = g.isRequired
+      ? Math.max(1, g.minSelect ?? 0)
+      : (g.minSelect ?? 0);
+    if ((g.maxSelect ?? 1) < min) {
+      throw new BadRequestException(
+        '"Choose up to" cannot be less than the number the customer must choose',
+      );
+    }
   }
 
   private async assertModifierGroupInBranch(branchId: string, id: string) {

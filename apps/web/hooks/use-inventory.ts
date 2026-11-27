@@ -20,10 +20,18 @@ import type {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
+// What the form sends: the server fills in the defaults for kind and conversions.
+export type IngredientInput = Omit<IngredientDto, "kind" | "conversions"> &
+  Partial<Pick<IngredientDto, "kind" | "conversions">>;
+
 export interface Ingredient {
   id: string;
   name: string;
   sku: string | null;
+  kind?: "PURCHASED" | "PREPARED";
+  category?: string | null;
+  storageLocation?: string | null;
+  parLevel?: string | null;
   unit: IngredientUnit;
   reorderLevel: string;
   currentStock: string;
@@ -210,7 +218,7 @@ export function useLowStockIngredients(branchId: string | null) {
 export function useCreateIngredient(branchId: string | null) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (dto: IngredientDto) =>
+    mutationFn: (dto: IngredientInput) =>
       api.post<Ingredient>(`/inventory/ingredients?branchId=${branchId}`, dto),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory", "ingredients", branchId] }),
   });
@@ -555,5 +563,85 @@ export function useSupplierPerformance(branchId: string | null, supplierId: stri
     queryFn: () =>
       api.get<SupplierPerformance>(`/inventory/suppliers/${supplierId}/performance?branchId=${branchId}`),
     enabled: !!branchId && !!supplierId,
+  });
+}
+
+// --- Purchase returns and price check ---------------------------------------------
+
+export interface PurchaseReturnRow {
+  id: string;
+  returnNumber: string;
+  reason: string;
+  notes: string | null;
+  totalAmount: string;
+  creditApplied: string;
+  creditOpen: string;
+  createdAt: string;
+  supplier: { id: string; name: string };
+  goodsReceipt: { id: string; grnNumber: string };
+  createdBy: { id: string; name: string };
+  items: { id: string; quantity: string; unitCost: string; ingredient: { name: string; unit: string } }[];
+}
+
+export function usePurchaseReturns(branchId: string | null) {
+  return useQuery({
+    queryKey: ["inventory", "purchase-returns", branchId],
+    queryFn: () => api.get<PurchaseReturnRow[]>(`/inventory/procurement/returns?branchId=${branchId}`),
+    enabled: !!branchId,
+  });
+}
+
+export function useCreatePurchaseReturn(branchId: string | null) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (dto: {
+      goodsReceiptId: string;
+      reason: string;
+      notes?: string;
+      items: { goodsReceiptItemId: string; quantity: number }[];
+      clientRequestId: string;
+    }) => api.post<PurchaseReturnRow>(`/inventory/procurement/returns?branchId=${branchId}`, dto),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory"] }),
+  });
+}
+
+export interface PriceVariance {
+  thresholdPct: number;
+  truncated: boolean;
+  lines: {
+    grnNumber: string;
+    receivedAt: string;
+    supplier: string;
+    ingredient: string;
+    unit: string;
+    quantity: string;
+    poUnitCost: string | null;
+    receivedUnitCost: string;
+    lastUnitCost: string | null;
+    poVariancePct: number | null;
+    lastVariancePct: number | null;
+    poVarianceAmount: string | null;
+    flagged: boolean;
+  }[];
+  invoiceChecks: {
+    grnNumber: string;
+    invoiceNumber: string;
+    supplier: string;
+    receiptTotal: string;
+    invoiceTotal: string;
+    difference: string;
+    differencePct: number | null;
+    flagged: boolean;
+  }[];
+  summary: { flaggedLines: number; flaggedInvoices: number; paidAboveOrderPrice: string };
+}
+
+export function usePriceVariance(branchId: string | null, from: string, to: string, threshold: number) {
+  return useQuery({
+    queryKey: ["inventory", "price-variance", branchId, from, to, threshold],
+    queryFn: () =>
+      api.get<PriceVariance>(`/inventory/procurement/price-variance?branchId=${branchId}&from=${from}&to=${to}&threshold=${threshold}`),
+    enabled: !!branchId && from <= to,
+    retry: false,
   });
 }

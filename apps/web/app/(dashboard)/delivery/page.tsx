@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat, type StaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -8,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useBranch } from "@/hooks/use-branch";
 import {
+  useAssignmentHistory,
   useDeliveries,
   useDeliveryActions,
   useDrivers,
@@ -17,39 +20,68 @@ import {
   type DeliveryStatus,
 } from "@/hooks/use-delivery";
 import { ApiError } from "@/lib/api";
-import { formatCurrency } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const STATUS_LABEL: Record<DeliveryStatus, string> = {
-  UNASSIGNED: "Needs driver",
-  ASSIGNED: "Driver assigned",
+  UNASSIGNED: "Unassigned",
+  ASSIGNED: "Rider assigned",
   PICKED_UP: "Out for delivery",
   DELIVERED: "Delivered",
   FAILED: "Failed",
 };
 
-const time = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong");
+const time = (fmt: StaffFormat, iso: string) => new Date(iso).toLocaleTimeString(fmt.localeTag, { hour: "2-digit", minute: "2-digit" });
+const errMsg = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
 
 function DeliveryCard({ order, branchId }: { order: DeliveryOrder; branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data: drivers } = useDrivers(branchId);
-  const { assign, setStatus } = useDeliveryActions(branchId);
+  const { assign, setStatus, trackLink } = useDeliveryActions(branchId);
+  const [linkNote, setLinkNote] = useState<string | null>(null);
   const status = order.deliveryStatus ?? "UNASSIGNED";
+  const [pending, setPending] = useState<string | null>(null); // rider chosen for a reassignment, waiting for a reason
+  const [reason, setReason] = useState("");
+  const [showHistory, setShowHistory] = useState(false);
+  const { data: history } = useAssignmentHistory(branchId, order.id, showHistory);
+  const chosen = drivers?.find((d) => d.id === pending);
+  const doAssign = (driverId: string, why?: string) =>
+    assign.mutate(
+      { orderId: order.id, driverId, reason: why },
+      { onSuccess: () => { setPending(null); setReason(""); }, onError: (err) => toast.error(errMsg(err, t("Something went wrong"))) },
+    );
+  // A link the customer opens to watch their delivery. Shared with the phone's share sheet where there is one, else copied.
+  const shareLink = () =>
+    trackLink.mutate(order.id, {
+      onSuccess: async (r) => {
+        const url = `${window.location.origin}/track/${r.token}`;
+        try {
+          if (navigator.share) await navigator.share({ title: t("Order {orderNumber}", { orderNumber: order.orderNumber }), url });
+          else {
+            await navigator.clipboard.writeText(url);
+            setLinkNote(t("Link copied. Send it to the customer."));
+          }
+        } catch {
+          setLinkNote(url); // clipboard blocked: show it so it can be copied by hand
+        }
+      },
+      onError: (e) => setLinkNote(errMsg(e, t("Something went wrong"))),
+    });
   const move = (next: DeliveryStatus) =>
-    setStatus.mutate({ orderId: order.id, status: next }, { onError: (e) => toast.error(errMsg(e)) });
+    setStatus.mutate({ orderId: order.id, status: next }, { onError: (e) => toast.error(errMsg(e, t("Something went wrong"))) });
 
   return (
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-sm font-semibold text-foreground">
-            #{order.orderNumber} · {order.guestName ?? "Guest"}
+            #{order.orderNumber} · {order.guestName ?? t("Guest")}
           </p>
           <p className="text-xs text-muted-foreground">
-            {order.deliveryAddress ?? "Address in notes"}
+            {order.deliveryAddress ?? t("Address in notes")}
             {order.deliveryPincode && ` · ${order.deliveryPincode}`}
           </p>
-          {order.deliveryPlace && <p className="text-xs text-foreground">Landmark: {order.deliveryPlace}</p>}
+          {order.deliveryPlace && <p className="text-xs text-foreground">{t("Landmark: {deliveryPlace}", { deliveryPlace: order.deliveryPlace })}</p>}
           {order.deliveryLat != null && order.deliveryLng != null && (
             <a
               href={`https://www.google.com/maps/search/?api=1&query=${order.deliveryLat},${order.deliveryLng}`}
@@ -57,10 +89,10 @@ function DeliveryCard({ order, branchId }: { order: DeliveryOrder; branchId: str
               rel="noopener noreferrer"
               className="block text-xs text-primary underline underline-offset-2"
             >
-              Customer shared their location — open map
+              {t("Customer shared their location — open map")}
             </a>
           )}
-          {order.deliveryFailedReason && <p className="text-xs text-destructive">Not delivered: {order.deliveryFailedReason}</p>}
+          {order.deliveryFailedReason && <p className="text-xs text-destructive">{t("Not delivered: {deliveryFailedReason}", { deliveryFailedReason: order.deliveryFailedReason })}</p>}
           {order.deliveryPhone && (
             <a href={`tel:${order.deliveryPhone}`} className="text-xs text-primary underline underline-offset-2">
               {order.deliveryPhone}
@@ -68,62 +100,86 @@ function DeliveryCard({ order, branchId }: { order: DeliveryOrder; branchId: str
           )}
         </div>
         <span className="rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-foreground">
-          {STATUS_LABEL[status]}
+          {fmt.label(STATUS_LABEL[status])}
         </span>
       </div>
-      <p className="text-xs text-muted-foreground">
-        {formatCurrency(order.totalAmount)} + {formatCurrency(order.deliveryFee)} delivery
-        {order.deliveryZone && ` · ${order.deliveryZone.name}`}
-        {order.deliveryEtaAt && ` · ETA ${time(order.deliveryEtaAt)}`}
-        {order.scheduledFor && ` · scheduled ${time(order.scheduledFor)}`}
+      <p className="text-xs text-muted-foreground">{t("{currency} + {currency2} delivery", { currency: fmt.currency(order.totalAmount), currency2: fmt.currency(order.deliveryFee) })}{order.deliveryZone && ` · ${order.deliveryZone.name}`}
+        {order.deliveryEtaAt && t(" · ETA {time}", { time: time(fmt, order.deliveryEtaAt) })}
+        {order.scheduledFor && t(" · scheduled {time}", { time: time(fmt, order.scheduledFor) })}
       </p>
       {order.notes && <p className="text-xs italic text-muted-foreground">{order.notes}</p>}
+      {linkNote && <p className="break-all text-xs text-muted-foreground" role="status">{linkNote}</p>}
       <div className="flex flex-wrap items-center gap-2">
         {(status === "UNASSIGNED" || status === "ASSIGNED") && (
           <select
-            aria-label="Driver"
-            value={order.driver?.id ?? ""}
-            onChange={(e) =>
-              e.target.value &&
-              assign.mutate(
-                { orderId: order.id, driverId: e.target.value },
-                { onError: (err) => toast.error(errMsg(err)) },
-              )
-            }
+            aria-label={t("Rider")}
+            value=""
+            onChange={(e) => {
+              const id = e.target.value;
+              if (!id || id === order.driver?.id) return;
+              if (order.driver) setPending(id); // moving it to someone else: ask why first
+              else doAssign(id);
+            }}
             className="rounded-lg border border-border bg-background px-2 py-1.5 text-sm"
           >
-            <option value="">Assign driver…</option>
-            {drivers?.map((d) => (
+            <option value="">{order.driver ? t("Reassign rider…") : t("Assign rider…")}</option>
+            {drivers?.filter((d) => d.id !== order.driver?.id).map((d) => (
               <option key={d.id} value={d.id}>
-                {d.riderOnline ? "● Online" : "○ Offline"} · {d.name}
-                {d.activeDeliveries > 0 ? ` (${d.activeDeliveries} active)` : ""}
+                {d.riderOnline ? t("● On shift") : t("○ Off shift")} · {d.name}
+                {d.activeDeliveries > 0 ? t(" ({activeDeliveries} active)", { activeDeliveries: d.activeDeliveries }) : t(" (free)")}
               </option>
             ))}
           </select>
         )}
-        {status === "PICKED_UP" && order.driver && (
-          <span className="text-xs text-muted-foreground">Driver: {order.driver.name}</span>
+        {order.driver && status !== "UNASSIGNED" && (
+          <span className="text-xs font-medium text-foreground">{t("Rider: {name}", { name: order.driver.name })}</span>
         )}
-        {status === "ASSIGNED" && <Button size="sm" onClick={() => move("PICKED_UP")}>Picked up</Button>}
-        {status === "PICKED_UP" && <Button size="sm" onClick={() => move("DELIVERED")}>Delivered</Button>}
+        {status === "UNASSIGNED" && <span className="text-xs font-medium text-muted-foreground">{t("Unassigned")}</span>}
+        {status !== "DELIVERED" && status !== "FAILED" && (
+          <Button size="sm" variant="outline" disabled={trackLink.isPending} onClick={shareLink}>{t("Customer link")}</Button>
+        )}
+        {status === "ASSIGNED" && <Button size="sm" onClick={() => move("PICKED_UP")}>{t("Picked up")}</Button>}
+        {status === "PICKED_UP" && <Button size="sm" onClick={() => move("DELIVERED")}>{t("Delivered")}</Button>}
         {status !== "DELIVERED" && status !== "FAILED" && (
           <Button size="sm" variant="outline" onClick={() => move("FAILED")}>
-            Mark failed
+            {t("Mark failed")}
           </Button>
         )}
       </div>
+      {pending && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/40 p-2">
+          <Input aria-label={t("Reason for reassigning")} className="h-8 min-w-48 flex-1" placeholder={t("Why move this to {value}? (required)", { value: chosen?.name ?? t("another rider") })} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
+          <Button size="sm" disabled={reason.trim().length < 3 || assign.isPending} onClick={() => doAssign(pending, reason)}>{t("Reassign")}</Button>
+          <Button size="sm" variant="outline" onClick={() => { setPending(null); setReason(""); }}>{t("Cancel")}</Button>
+        </div>
+      )}
+      {(order.driver || showHistory) && (
+        <div className="text-xs">
+          <button type="button" className="text-primary underline underline-offset-2" onClick={() => setShowHistory((v) => !v)}>{showHistory ? t("Hide rider history") : t("Rider history")}</button>
+          {showHistory && (
+            <ul className="mt-1 flex flex-col gap-0.5 text-muted-foreground">
+              {(history ?? []).length === 0 && <li>{t("No rider changes yet.")}</li>}
+              {(history ?? []).map((h) => (
+                <li key={h.id}>{time(fmt, h.at)} · {h.from ?? t("Unassigned")} → {h.to ?? t("Unassigned")} {t("· by {by}", { by: h.by })}{h.reason ? ` · ${h.reason}` : ""}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </Card>
   );
 }
 
 function ZonesTab({ branchId }: { branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data: zones, isLoading } = useZones(branchId);
   const { create, remove, update } = useZoneActions(branchId);
   const [form, setForm] = useState({ name: "", fee: "40", minOrderAmount: "0", etaMinutes: "45", pincodes: "" });
 
   const submit = () => {
     const pincodes = form.pincodes.split(/[\s,]+/).filter(Boolean);
-    if (!form.name.trim() || pincodes.length === 0) return toast.error("Enter a name and at least one pincode");
+    if (!form.name.trim() || pincodes.length === 0) return toast.error(t("Enter a name and at least one pincode"));
     create.mutate(
       {
         name: form.name.trim(),
@@ -135,10 +191,10 @@ function ZonesTab({ branchId }: { branchId: string | null }) {
       },
       {
         onSuccess: () => {
-          toast.success("Zone added");
+          toast.success(t("Zone added"));
           setForm({ ...form, name: "", pincodes: "" });
         },
-        onError: (e) => toast.error(errMsg(e)),
+        onError: (e) => toast.error(errMsg(e, t("Something went wrong"))),
       },
     );
   };
@@ -146,16 +202,15 @@ function ZonesTab({ branchId }: { branchId: string | null }) {
   return (
     <div className="flex flex-col gap-4">
       <Card className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-5">
-        <Input placeholder="Zone name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <Input placeholder="Fee" inputMode="decimal" value={form.fee} onChange={(e) => setForm({ ...form, fee: e.target.value })} />
-        <Input placeholder="Min order" inputMode="decimal" value={form.minOrderAmount} onChange={(e) => setForm({ ...form, minOrderAmount: e.target.value })} />
-        <Input placeholder="ETA (min)" inputMode="numeric" value={form.etaMinutes} onChange={(e) => setForm({ ...form, etaMinutes: e.target.value })} />
-        <Input placeholder="Pincodes, comma separated" value={form.pincodes} onChange={(e) => setForm({ ...form, pincodes: e.target.value })} />
+        <Input placeholder={t("Zone name")} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <Input placeholder={t("Fee")} inputMode="decimal" value={form.fee} onChange={(e) => setForm({ ...form, fee: e.target.value })} />
+        <Input placeholder={t("Min order")} inputMode="decimal" value={form.minOrderAmount} onChange={(e) => setForm({ ...form, minOrderAmount: e.target.value })} />
+        <Input placeholder={t("ETA (min)")} inputMode="numeric" value={form.etaMinutes} onChange={(e) => setForm({ ...form, etaMinutes: e.target.value })} />
+        <Input placeholder={t("Pincodes, comma separated")} value={form.pincodes} onChange={(e) => setForm({ ...form, pincodes: e.target.value })} />
         <div className="sm:col-span-2 lg:col-span-5">
-          <Button onClick={submit} disabled={create.isPending}>Add zone</Button>
+          <Button onClick={submit} disabled={create.isPending}>{t("Add zone")}</Button>
           <p className="mt-2 text-xs text-muted-foreground">
-            Until you add a zone, delivery orders are accepted from anywhere with no fee. Once a zone exists, only
-            its pincodes can order delivery.
+            {t("Until you add a zone, delivery orders are accepted from anywhere with no fee. Once a zone exists, only its pincodes can order delivery.")}
           </p>
         </div>
       </Card>
@@ -167,31 +222,28 @@ function ZonesTab({ branchId }: { branchId: string | null }) {
             <div key={z.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm">
               <div>
                 <p className={cn("font-medium", !z.isActive && "text-muted-foreground line-through")}>{z.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  {formatCurrency(z.fee)} fee · min {formatCurrency(z.minOrderAmount)} · {z.etaMinutes} min ·{" "}
-                  {z.pincodes.join(", ")}
-                </p>
+                <p className="text-xs text-muted-foreground">{t("{formatCurrency} fee · min {formatCurrency2} · {etaMinutes} min · {join}", { formatCurrency: fmt.currency(z.fee), formatCurrency2: fmt.currency(z.minOrderAmount), etaMinutes: z.etaMinutes, join: z.pincodes.join(", ") })}</p>
               </div>
               <div className="flex gap-2">
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => update.mutate({ id: z.id, dto: { isActive: !z.isActive } }, { onError: (e) => toast.error(errMsg(e)) })}
+                  onClick={() => update.mutate({ id: z.id, dto: { isActive: !z.isActive } }, { onError: (e) => toast.error(errMsg(e, t("Something went wrong"))) })}
                 >
-                  {z.isActive ? "Disable" : "Enable"}
+                  {z.isActive ? t("Disable") : t("Enable")}
                 </Button>
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => confirm(`Delete zone ${z.name}?`) && remove.mutate(z.id)}
+                  onClick={() => confirm(t("Delete zone {name}?", { name: z.name })) && remove.mutate(z.id)}
                 >
-                  Delete
+                  {t("Delete")}
                 </Button>
               </div>
             </div>
           ))
         ) : (
-          <p className="p-6 text-center text-sm text-muted-foreground">No delivery zones yet.</p>
+          <p className="p-6 text-center text-sm text-muted-foreground">{t("No delivery zones yet.")}</p>
         )}
       </Card>
     </div>
@@ -199,18 +251,17 @@ function ZonesTab({ branchId }: { branchId: string | null }) {
 }
 
 function RidersPanel({ branchId }: { branchId: string | null }) {
+  const { t } = useI18n();
   const { data: drivers, dataUpdatedAt } = useDrivers(branchId);
   if (!drivers || drivers.length === 0) return null;
   const ago = (iso: string | null) => {
-    if (!iso) return "no location yet";
+    if (!iso) return t("no location yet");
     const m = Math.max(Math.round((dataUpdatedAt - new Date(iso).getTime()) / 60_000), 0);
-    return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+    return m < 1 ? t("just now") : m < 60 ? t("{m} min ago", { m }) : t("{round} h ago", { round: Math.round(m / 60) });
   };
   return (
     <section aria-labelledby="riders-h" className="flex flex-col gap-2">
-      <h2 id="riders-h" className="text-sm font-medium text-foreground">
-        Riders ({drivers.filter((d) => d.riderOnline).length} online)
-      </h2>
+      <h2 id="riders-h" className="text-sm font-medium text-foreground">{t("Riders ({count} online)", { count: drivers.filter((d) => d.riderOnline).length })}</h2>
       <ul className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {drivers.map((d) => (
           <li key={d.id} className="flex items-center justify-between gap-3 rounded-xl border border-border p-3 text-sm">
@@ -222,8 +273,7 @@ function RidersPanel({ branchId }: { branchId: string | null }) {
                 {d.name}
               </p>
               <p className="truncate text-xs text-muted-foreground">
-                {d.riderOnline ? "Online" : "Offline"} · {d.activeDeliveries} active
-                {d.riderOnline && ` · ${ago(d.riderLocationAt)}`}
+                {d.riderOnline ? t("Online") : t("Offline")} {t("· {activeDeliveries} active", { activeDeliveries: d.activeDeliveries })}{d.riderOnline && ` · ${ago(d.riderLocationAt)}`}
               </p>
             </div>
             {d.riderOnline && d.riderLat != null && d.riderLng != null && (
@@ -233,7 +283,7 @@ function RidersPanel({ branchId }: { branchId: string | null }) {
                 rel="noopener noreferrer"
                 className="shrink-0 text-xs text-primary underline underline-offset-2"
               >
-                Map
+                {t("Map")}
               </a>
             )}
           </li>
@@ -244,6 +294,7 @@ function RidersPanel({ branchId }: { branchId: string | null }) {
 }
 
 export default function DeliveryPage() {
+  const { t: translate } = useI18n();
   const { branchId } = useBranch();
   const [tab, setTab] = useState<"active" | "history" | "zones">("active");
   const { data: orders, isLoading } = useDeliveries(branchId, tab === "history");
@@ -251,8 +302,8 @@ export default function DeliveryPage() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Delivery</h1>
-        <p className="text-sm text-muted-foreground">Assign drivers, track deliveries, and manage zones</p>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{translate("Delivery")}</h1>
+        <p className="text-sm text-muted-foreground">{translate("Assign drivers, track deliveries, and manage zones")}</p>
       </div>
       <RidersPanel branchId={branchId} />
       <div className="flex gap-2">
@@ -266,7 +317,7 @@ export default function DeliveryPage() {
               tab === t ? "border-primary bg-primary text-primary-foreground" : "border-border text-muted-foreground hover:bg-secondary",
             )}
           >
-            {t}
+            {translate(t)}
           </button>
         ))}
       </div>
@@ -282,7 +333,7 @@ export default function DeliveryPage() {
         </div>
       ) : (
         <Card className="p-8 text-center text-sm text-muted-foreground">
-          {tab === "active" ? "No active deliveries." : "No completed deliveries yet."}
+          {tab === "active" ? translate("No active deliveries.") : translate("No completed deliveries yet.")}
         </Card>
       )}
     </div>

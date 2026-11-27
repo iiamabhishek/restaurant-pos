@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { PermissionChecklist } from "@/components/settings/permission-checklist";
@@ -20,6 +21,7 @@ import { ApiError } from "@/lib/api";
 // conditional mount, not an open-prop + reset-effect, so every open starts
 // with clean state for free.
 export function CreateRoleDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useI18n();
   const [name, setName] = useState("");
   const [label, setLabel] = useState("");
   const [permissionKeys, setPermissionKeys] = useState<string[]>([]);
@@ -36,11 +38,11 @@ export function CreateRoleDialog({ onClose }: { onClose: () => void }) {
       { name: name.trim(), label: label.trim(), permissionKeys },
       {
         onSuccess: () => {
-          toast.success(`${label.trim()} role created`);
+          toast.success(t("{trim} role created", { trim: label.trim() }));
           onClose();
         },
         onError: (err) =>
-          toast.error(err instanceof ApiError ? err.message : "Could not create role"),
+          toast.error(err instanceof ApiError ? err.message : t("Could not create role")),
       },
     );
   };
@@ -50,41 +52,41 @@ export function CreateRoleDialog({ onClose }: { onClose: () => void }) {
       <DialogContent className="sm:max-w-lg">
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>Create custom role</DialogTitle>
+            <DialogTitle>{t("Create custom role")}</DialogTitle>
           </DialogHeader>
 
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-name">Name</Label>
+              <Label htmlFor="r-name">{t("Name")}</Label>
               <Input
                 id="r-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="DISPLAY"
+                placeholder={t("DISPLAY")}
                 required
                 autoFocus
               />
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="r-label">Display label</Label>
+              <Label htmlFor="r-label">{t("Display label")}</Label>
               <Input
                 id="r-label"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
-                placeholder="Display"
+                placeholder={t("Display")}
                 required
               />
             </div>
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label>Permissions</Label>
+            <Label>{t("Permissions")}</Label>
             <PermissionChecklist selected={permissionKeys} onToggle={togglePermission} />
           </div>
 
           <DialogFooter>
             <Button type="submit" disabled={createRole.isPending}>
-              {createRole.isPending ? "Creating…" : "Create role"}
+              {createRole.isPending ? t("Creating…") : t("Create role")}
             </Button>
           </DialogFooter>
         </form>

@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { billQueryString, type BillQuery } from "@/lib/print";
@@ -30,6 +31,7 @@ export interface PrintJobResult {
 
 /** kind "kot" prints a sample kitchen ticket instead of the receipt test slip. */
 export function usePrintTestSlip(branchId?: string | null, kind?: "kot") {
+  const { t } = useI18n();
   return useMutation({
     mutationFn: async () => {
       const onDevice = canPrintOnDevice();
@@ -37,7 +39,7 @@ export function usePrintTestSlip(branchId?: string | null, kind?: "kot") {
         .filter(Boolean)
         .join("&");
       const r = await api.post<{ ok: true; escpos?: string[] }>(`/orders/print/test?${q}`);
-      if (onDevice && r.escpos) await printEscposOnDevice(r.escpos);
+      if (onDevice && r.escpos) await printEscposOnDevice(t, r.escpos);
       return { ok: true as const };
     },
   });
@@ -49,6 +51,7 @@ export function usePrintTestSlip(branchId?: string | null, kind?: "kot") {
  * a bill printed before payment never opens the drawer.
  */
 export function usePrintOrderUsb(branchId: string | null) {
+  const { t } = useI18n();
   return useMutation({
     mutationFn: async ({ orderId, drawer, adjustments }: { orderId: string; drawer?: boolean; adjustments?: BillQuery }) => {
       // In the phone app the bill goes to the phone's own Bluetooth printer;
@@ -57,7 +60,7 @@ export function usePrintOrderUsb(branchId: string | null) {
       const r = await api.post<PrintJobResult & { escpos?: string[] }>(
         `/orders/${orderId}/print/usb?branchId=${branchId}${drawer ? "&drawer=true" : ""}${onDevice ? "&via=device" : ""}${billQueryString(adjustments)}`,
       );
-      if (onDevice && r.escpos) await printEscposOnDevice(r.escpos);
+      if (onDevice && r.escpos) await printEscposOnDevice(t, r.escpos);
       return { ok: true as const, unsupportedChars: r.unsupportedChars };
     },
   });
@@ -73,25 +76,27 @@ export interface KotPrintResult extends PrintJobResult {
  * ALREADY_PRINTED; `reprint: true` prints another copy stamped REPRINT.
  */
 export function usePrintKot(branchId: string | null) {
+  const { t } = useI18n();
   return useMutation({
     mutationFn: async ({ orderId, reprint }: { orderId: string; reprint?: boolean }) => {
       const onDevice = canPrintOnDevice();
       const r = await api.post<KotPrintResult & { escpos?: string[] }>(
         `/orders/${orderId}/print/kot?branchId=${branchId}${reprint ? "&reprint=true" : ""}${onDevice ? "&via=device" : ""}`,
       );
-      if (onDevice && r.escpos) await printEscposOnDevice(r.escpos);
+      if (onDevice && r.escpos) await printEscposOnDevice(t, r.escpos);
       return r as KotPrintResult;
     },
   });
 }
 
 export function useOpenCashDrawer() {
+  const { t } = useI18n();
   return useMutation({
     mutationFn: async (branchId?: string | null) => {
       const onDevice = canPrintOnDevice();
       const q = [branchId ? `branchId=${branchId}` : "", onDevice ? "via=device" : ""].filter(Boolean).join("&");
       const r = await api.post<{ ok: true; escpos?: string[] }>(`/orders/print/drawer${q ? `?${q}` : ""}`);
-      if (onDevice && r.escpos) await printEscposOnDevice(r.escpos);
+      if (onDevice && r.escpos) await printEscposOnDevice(t, r.escpos);
       return { ok: true as const };
     },
   });

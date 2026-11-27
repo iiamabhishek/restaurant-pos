@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { PERMISSIONS } from "@nodedr-restaurant/types";
 import { ShieldCheck } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -38,6 +40,8 @@ const tomorrow = () => new Date(Date.now() + 86_400_000).toISOString().slice(0, 
  * one thing, optionally until a date. Everything else stays "Role" (inherit).
  */
 export function StaffAccessDialog({ member }: { member: StaffMember }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const { data: me } = useCurrentUser();
   const { data: roles } = useRoles();
@@ -76,7 +80,7 @@ export function StaffAccessDialog({ member }: { member: StaffMember }) {
   const onSave = () => {
     const expiresAt = until ? new Date(`${until}T23:59:59`).toISOString() : undefined;
     if (expiresAt && new Date(expiresAt).getTime() <= Date.now()) {
-      toast.error("Pick an end date in the future");
+      toast.error(t("Pick an end date in the future"));
       return;
     }
     save.mutate(
@@ -91,10 +95,10 @@ export function StaffAccessDialog({ member }: { member: StaffMember }) {
       },
       {
         onSuccess: () => {
-          toast.success(`${member.name}'s access updated`);
+          toast.success(t("{name}'s access updated", { name: member.name }));
           setOpen(false);
         },
-        onError: (e) => toast.error(e instanceof ApiError ? e.message : "Could not save"),
+        onError: (e) => toast.error(e instanceof ApiError ? e.message : t("Could not save")),
       },
     );
   };
@@ -105,33 +109,32 @@ export function StaffAccessDialog({ member }: { member: StaffMember }) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogTrigger
         render={
-          <Button variant="ghost" size="sm" className="h-8 gap-1 px-2 text-xs" aria-label={`Access exceptions for ${member.name}`}>
+          <Button variant="ghost" size="sm" className="h-8 gap-1 px-2 text-xs" aria-label={t("Access exceptions for {name}", { name: member.name })}>
             <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
-            <span className="hidden sm:inline">Access</span>
+            <span className="hidden sm:inline">{t("Access")}</span>
             {count > 0 && <span className="tabular-nums">{count}</span>}
           </Button>
         }
       />
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Access for {member.name}</DialogTitle>
+          <DialogTitle>{t("Access for {name}", { name: member.name })}</DialogTitle>
           <DialogDescription>
-            Starts from the <strong>{member.role.label}</strong> role. Allow or block single permissions for this person only.
-            Block always wins.
+            {t("Starts from the")} <strong>{fmt.role(member.role.name, member.role.label)}</strong> {t("role. Allow or block single permissions for this person only. Block always wins.")}
           </DialogDescription>
         </DialogHeader>
 
         {isOwner ? (
           <p className="rounded-lg border border-border bg-muted/40 p-3 text-sm text-muted-foreground">
-            The owner always has full access, so exceptions are not available.
+            {t("The owner always has full access, so exceptions are not available.")}
           </p>
         ) : (
           <>
             <div className="max-h-[50vh] overflow-y-auto rounded-lg border border-border">
               {groups.map(([category, perms]) => (
-                <section key={category} aria-label={category}>
+                <section key={category} aria-label={fmt.label(category)}>
                   <h3 className="sticky top-0 z-10 border-b border-border bg-card px-3 py-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                    {category}
+                    {fmt.label(category)}
                   </h3>
                   {perms.map((p) => {
                     const value = choices[p.key] ?? "DEFAULT";
@@ -140,10 +143,10 @@ export function StaffAccessDialog({ member }: { member: StaffMember }) {
                     return (
                       <div key={p.key} className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-2 last:border-b-0">
                         <div className="min-w-0 flex-1">
-                          <p className="text-sm text-foreground">{p.label}</p>
-                          <p className="text-xs text-muted-foreground">{inRole ? "Included in role" : "Not in role"}</p>
+                          <p className="text-sm text-foreground">{fmt.label(p.label)}</p>
+                          <p className="text-xs text-muted-foreground">{inRole ? t("Included in role") : t("Not in role")}</p>
                         </div>
-                        <div role="radiogroup" aria-label={p.label} className="inline-flex rounded-lg border border-border p-0.5">
+                        <div role="radiogroup" aria-label={fmt.label(p.label)} className="inline-flex rounded-lg border border-border p-0.5">
                           {CHOICES.map((c) => {
                             const disabled = c.value === "GRANT" && cannotGrant;
                             const active = value === c.value;
@@ -154,7 +157,7 @@ export function StaffAccessDialog({ member }: { member: StaffMember }) {
                                 role="radio"
                                 aria-checked={active}
                                 disabled={disabled}
-                                title={disabled ? "You can only allow permissions you have yourself" : undefined}
+                                title={disabled ? t("You can only allow permissions you have yourself") : undefined}
                                 onClick={() => setChoices((prev) => ({ ...prev, [p.key]: c.value }))}
                                 className={cn(
                                   "min-h-8 min-w-14 rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40",
@@ -164,7 +167,7 @@ export function StaffAccessDialog({ member }: { member: StaffMember }) {
                                   !active && "text-muted-foreground hover:text-foreground",
                                 )}
                               >
-                                {c.label}
+                                {t(c.label)}
                               </button>
                             );
                           })}
@@ -178,21 +181,21 @@ export function StaffAccessDialog({ member }: { member: StaffMember }) {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="flex flex-col gap-2">
-                <Label htmlFor="ov-until">Exceptions end on (optional)</Label>
+                <Label htmlFor="ov-until">{t("Exceptions end on (optional)")}</Label>
                 <Input id="ov-until" type="date" min={tomorrow()} value={until} onChange={(e) => setUntil(e.target.value)} />
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="ov-reason">Reason (optional)</Label>
-                <Input id="ov-reason" maxLength={200} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. covering for the manager" />
+                <Label htmlFor="ov-reason">{t("Reason (optional)")}</Label>
+                <Input id="ov-reason" maxLength={200} value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t("e.g. covering for the manager")} />
               </div>
             </div>
 
             <DialogFooter className="items-center sm:justify-between">
               <Badge variant="secondary" className="font-normal">
-                {changed.length === 0 ? "No exceptions" : `${changed.length} exception${changed.length === 1 ? "" : "s"}`}
+                {changed.length === 0 ? t("No exceptions") : (changed.length === 1 ? t("{count} exception", { count: changed.length }) : t("{count} exceptions", { count: changed.length }))}
               </Badge>
               <Button onClick={onSave} disabled={save.isPending}>
-                {save.isPending ? "Saving…" : "Save access"}
+                {save.isPending ? t("Saving…") : t("Save access")}
               </Button>
             </DialogFooter>
           </>

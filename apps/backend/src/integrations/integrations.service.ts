@@ -1,6 +1,7 @@
 import {
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -48,6 +49,8 @@ export interface IntegrationKeyContext {
  */
 @Injectable()
 export class IntegrationsService {
+  private readonly logger = new Logger(IntegrationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly orders: OrdersService,
@@ -106,6 +109,7 @@ export class IntegrationsService {
             // "HH:mm" window the item can be ordered in, if the owner set one.
             availableFrom: true,
             availableTo: true,
+            pausedUntil: true,
             modifierGroups: {
               orderBy: { sortOrder: 'asc' },
               select: {
@@ -117,6 +121,7 @@ export class IntegrationsService {
                     maxSelect: true,
                     isRequired: true,
                     modifiers: {
+                      where: { isActive: true },
                       orderBy: { sortOrder: 'asc' },
                       select: {
                         id: true,
@@ -133,13 +138,17 @@ export class IntegrationsService {
         },
       },
     });
-    const adjust = onlinePriceAdjustOf(
-      await this.prisma.restaurant.findUniqueOrThrow({
-        where: { id: ctx.restaurantId },
-        select: { onlinePriceAdjustKind: true, onlinePriceAdjustValue: true },
-      }),
-    );
+    const settings = await this.prisma.restaurant.findUniqueOrThrow({
+      where: { id: ctx.restaurantId },
+      select: {
+        onlinePriceAdjustKind: true,
+        onlinePriceAdjustValue: true,
+        timezone: true,
+      },
+    });
+    const adjust = onlinePriceAdjustOf(settings);
     return {
+      timezone: settings.timezone,
       locationId: branch.id,
       locationName: branch.name,
       categories: categories.map((category) => ({
@@ -361,38 +370,47 @@ export class IntegrationsService {
       }
     }
     if (dto.redeemPoints) {
-      const [cust, rest, order] = await Promise.all([
-        this.prisma.customer.findUniqueOrThrow({
-          where: { id: customerId },
-          select: { loyaltyPoints: true },
-        }),
-        this.prisma.restaurant.findUniqueOrThrow({
-          where: { id: ctx.restaurantId },
-          select: { loyaltyPointValue: true },
-        }),
-        this.prisma.order.findUniqueOrThrow({
-          where: { id: orderId },
-          select: { subtotal: true },
-        }),
-      ]);
-      const value = Number(rest.loyaltyPointValue);
-      if (value > 0) {
-        // Never more than the balance, never more than the bill is worth.
-        const cap = Math.floor(Number(order.subtotal) / value);
-        const points = Math.max(
-          0,
-          Math.min(dto.redeemPoints, cust.loyaltyPoints, cap),
-        );
-        if (points > 0) {
-          await this.prisma.order.update({
+      // This runs AFTER the order is committed. A transient DB error here must
+      // not turn a successfully placed order into a 500 for the caller.
+      try {
+        const [cust, rest, order] = await Promise.all([
+          this.prisma.customer.findUniqueOrThrow({
+            where: { id: customerId },
+            select: { loyaltyPoints: true },
+          }),
+          this.prisma.restaurant.findUniqueOrThrow({
+            where: { id: ctx.restaurantId },
+            select: { loyaltyPointValue: true },
+          }),
+          this.prisma.order.findUniqueOrThrow({
             where: { id: orderId },
-            data: { requestedRedeemPoints: points },
-          });
-          out.redeem = {
-            points,
-            discount: Math.round(points * value * 100) / 100,
-          };
+            select: { subtotal: true },
+          }),
+        ]);
+        const value = Number(rest.loyaltyPointValue);
+        if (value > 0) {
+          // Never more than the balance, never more than the bill is worth.
+          const cap = Math.floor(Number(order.subtotal) / value);
+          const points = Math.max(
+            0,
+            Math.min(dto.redeemPoints, cust.loyaltyPoints, cap),
+          );
+          if (points > 0) {
+            await this.prisma.order.update({
+              where: { id: orderId },
+              data: { requestedRedeemPoints: points },
+            });
+            out.redeem = {
+              points,
+              discount: Math.round(points * value * 100) / 100,
+            };
+          }
         }
+      } catch (e) {
+        this.logger.warn(
+          `Order ${orderId} was placed but points redemption failed: ${(e as Error).message}`,
+        );
+        out.redeem = { points: 0, discount: 0 };
       }
     }
     return out;
@@ -550,8 +568,20 @@ export class IntegrationsService {
     reservationId: string,
   ) {
     await this.assertBranch(ctx, branchId);
+    // A website key may look up a booking's status, as its scope says. Only online bookings, and only what a
+    // status page needs: walk-in and staff-made bookings, and contact details, deposits and table assignments of
+    // any booking, are not a website key's to read.
     const reservation = await this.prisma.reservation.findFirst({
-      where: { id: reservationId, branchId },
+      where: { id: reservationId, branchId, channel: 'ONLINE' },
+      select: {
+        id: true,
+        status: true,
+        reservedAt: true,
+        durationMinutes: true,
+        guestCount: true,
+        customerName: true,
+        createdAt: true,
+      },
     });
     if (!reservation) throw new NotFoundException('Reservation not found');
     return reservation;

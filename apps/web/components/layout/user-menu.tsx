@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import type { SessionUser } from "@nodedr-restaurant/types";
 import { LogOut, Moon, Server, Sun, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -29,7 +31,9 @@ function initials(name?: string) {
 }
 
 export function UserMenu({ user }: { user?: SessionUser }) {
-  const { theme, setTheme } = useTheme();
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
+  const { resolvedTheme, setTheme } = useTheme();
   const logout = useLogout();
   const router = useRouter();
   const [deleting, setDeleting] = useState(false);
@@ -38,9 +42,9 @@ export function UserMenu({ user }: { user?: SessionUser }) {
     <div className="flex items-center gap-2">
       <button
         type="button"
-        onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+        onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
         className="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary"
-        aria-label="Toggle theme"
+        aria-label={t("Toggle theme")}
       >
         <Sun className="h-[18px] w-[18px] dark:hidden" />
         <Moon className="hidden h-[18px] w-[18px] dark:block" />
@@ -58,26 +62,26 @@ export function UserMenu({ user }: { user?: SessionUser }) {
         <DropdownMenuContent align="end" className="w-56">
           <DropdownMenuLabel>
             <p className="text-sm font-medium">{user?.name}</p>
-            <p className="text-xs font-normal text-muted-foreground">{user?.roleName}</p>
+            <p className="text-xs font-normal text-muted-foreground">{fmt.role(user?.roleName)}</p>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem
             onClick={() => logout.mutate(undefined, { onSuccess: () => router.push("/login") })}
           >
             <LogOut className="h-4 w-4" />
-            Sign out
+            {t("Sign out")}
           </DropdownMenuItem>
           {isNativeApp() && (
             <DropdownMenuItem
               onClick={() => logout.mutate(undefined, { onSuccess: () => changeServer() })}
             >
               <Server className="h-4 w-4" />
-              Change server
+              {t("Change server")}
             </DropdownMenuItem>
           )}
           <DropdownMenuItem onClick={() => setDeleting(true)} className="text-destructive">
             <Trash2 className="h-4 w-4" />
-            Delete my account
+            {t("Delete my account")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

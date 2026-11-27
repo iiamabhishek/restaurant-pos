@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { Eye, EyeOff } from "lucide-react";
 import * as React from "react";
 import { Input } from "@/components/ui/input";
@@ -12,6 +13,7 @@ export function PasswordInput({
   className,
   ...props
 }: Omit<React.ComponentProps<"input">, "type">) {
+  const { t } = useI18n();
   const [visible, setVisible] = React.useState(false);
   return (
     <div className="relative">
@@ -28,7 +30,7 @@ export function PasswordInput({
         type="button"
         onClick={() => setVisible((v) => !v)}
         onMouseDown={(e) => e.preventDefault()}
-        aria-label={visible ? "Hide password" : "Show password"}
+        aria-label={visible ? t("Hide password") : t("Show password")}
         aria-pressed={visible}
         className="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-lg text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none"
       >

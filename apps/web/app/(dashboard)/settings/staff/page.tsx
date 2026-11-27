@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Trash2 } from "lucide-react";
 import { toast } from "@/lib/toast";
 import { DepartmentsCard } from "@/components/settings/departments-card";
@@ -25,6 +27,8 @@ import { api, ApiError } from "@/lib/api";
 import { useState } from "react";
 
 export default function StaffPage() {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data: staff, isLoading } = useStaff();
   const { data: currentUser } = useCurrentUser();
   const updateStaff = useUpdateStaff();
@@ -35,40 +39,40 @@ export default function StaffPage() {
   const canEditAccess = currentUser?.user.permissions.includes("roles.manage") ?? false;
 
   const onResetTwoFactor = (member: StaffMember) => {
-    if (!confirm(`Turn off two-factor authentication for ${member.name}? They will sign in with just their password until they set it up again.`)) return;
+    if (!confirm(t("Turn off two-factor authentication for {name}? They will sign in with just their password until they set it up again.", { name: member.name }))) return;
     api.post(`/auth/2fa/reset/${member.id}`).then(
-      () => toast.success(`Two-factor authentication reset for ${member.name}`),
-      (err) => toast.error(err instanceof ApiError ? err.message : "Could not reset"),
+      () => toast.success(t("Two-factor authentication reset for {name}", { name: member.name })),
+      (err) => toast.error(err instanceof ApiError ? err.message : t("Could not reset")),
     );
   };
 
   const onDelete = (member: StaffMember) => {
-    if (!confirm(`Delete ${member.name}? This cannot be undone.`)) return;
+    if (!confirm(t("Delete {name}? This cannot be undone.", { name: member.name }))) return;
     deleteStaff.mutate(member.id, {
-      onSuccess: () => toast.success(`${member.name} deleted`),
+      onSuccess: () => toast.success(t("{name} deleted", { name: member.name })),
       onError: (err) =>
-        toast.error(err instanceof ApiError ? err.message : "Could not delete staff account"),
+        toast.error(err instanceof ApiError ? err.message : t("Could not delete staff account")),
     });
   };
 
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Settings</h1>
-        <p className="text-sm text-muted-foreground">Restaurant, branch, and staff configuration</p>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("Settings")}</h1>
+        <p className="text-sm text-muted-foreground">{t("Restaurant, branch, and staff configuration")}</p>
       </div>
 
       <SettingsTabs />
 
       <Card className="flex flex-col gap-4 p-6">
         <div className="flex items-center justify-between">
-          <h2 className="text-[18px] font-medium text-foreground">Staff accounts</h2>
+          <h2 className="text-[18px] font-medium text-foreground">{t("Staff accounts")}</h2>
           <AddStaffDialog />
         </div>
 
         {departments && departments.length > 0 && (
-          <div role="group" aria-label="Filter by department" className="flex flex-wrap gap-1.5">
-            {[{ id: "all", name: "Everyone" }, ...departments, { id: "none", name: "No department" }].map((d) => (
+          <div role="group" aria-label={t("Filter by department")} className="flex flex-wrap gap-1.5">
+            {[{ id: "all", name: t("Everyone") }, ...departments, { id: "none", name: t("No department") }].map((d) => (
               <button
                 key={d.id}
                 type="button"
@@ -94,12 +98,12 @@ export default function StaffPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead className="hidden md:table-cell">Contact</TableHead>
-                <TableHead>Role</TableHead>
-                <TableHead className="hidden md:table-cell">Department</TableHead>
-                <TableHead className="hidden lg:table-cell">Branches</TableHead>
-                <TableHead className="text-right">Active</TableHead>
+                <TableHead>{t("Name")}</TableHead>
+                <TableHead className="hidden md:table-cell">{t("Contact")}</TableHead>
+                <TableHead>{t("Role")}</TableHead>
+                <TableHead className="hidden md:table-cell">{t("Department")}</TableHead>
+                <TableHead className="hidden lg:table-cell">{t("Branches")}</TableHead>
+                <TableHead className="text-right">{t("Active")}</TableHead>
                 <TableHead className="sm:w-64" />
               </TableRow>
             </TableHeader>
@@ -112,7 +116,7 @@ export default function StaffPage() {
                   </TableCell>
                   <TableCell>
                     <Badge variant="secondary" className="font-normal">
-                      {member.role.label}
+                      {fmt.role(member.role.name, member.role.label)}
                     </Badge>
                   </TableCell>
                   <TableCell className="hidden text-muted-foreground md:table-cell">{member.department?.name ?? "—"}</TableCell>
@@ -121,7 +125,7 @@ export default function StaffPage() {
                   </TableCell>
                   <TableCell className="text-right">
                     <Switch
-                      aria-label={`${member.name} active`}
+                      aria-label={t("{name} active", { name: member.name })}
                       checked={member.isActive}
                       onCheckedChange={(checked) =>
                         updateStaff.mutate(
@@ -130,7 +134,7 @@ export default function StaffPage() {
                             onSuccess: () =>
                               toast.success(`${member.name} ${checked ? "enabled" : "disabled"}`),
                             onError: (err) =>
-                              toast.error(err instanceof ApiError ? err.message : "Could not update"),
+                              toast.error(err instanceof ApiError ? err.message : t("Could not update")),
                           },
                         )
                       }
@@ -144,16 +148,16 @@ export default function StaffPage() {
                           variant="ghost"
                           size="sm"
                           className="h-8 px-2 text-xs text-muted-foreground"
-                          title="Reset two-factor authentication (lost device)"
+                          title={t("Reset two-factor authentication (lost device)")}
                           onClick={() => onResetTwoFactor(member)}
                         >
-                          Reset 2FA
+                          {t("Reset 2FA")}
                         </Button>
                         <Button
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          title="Delete staff account"
+                          title={t("Delete staff account")}
                           onClick={() => onDelete(member)}
                         >
                           <Trash2 className="h-4 w-4" />
@@ -167,8 +171,8 @@ export default function StaffPage() {
           </Table>
         ) : (
           <div className="flex flex-col items-center gap-2 py-16 text-center">
-            <p className="text-sm font-medium text-foreground">{staff && staff.length > 0 ? "No staff in this department" : "No staff accounts yet"}</p>
-            <p className="text-sm text-muted-foreground">{staff && staff.length > 0 ? "Choose another filter above." : "Add your first staff account above."}</p>
+            <p className="text-sm font-medium text-foreground">{staff && staff.length > 0 ? t("No staff in this department") : t("No staff accounts yet")}</p>
+            <p className="text-sm text-muted-foreground">{staff && staff.length > 0 ? t("Choose another filter above.") : t("Add your first staff account above.")}</p>
           </div>
         )}
       </Card>

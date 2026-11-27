@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="apps/web/public/brand-lockup.png" alt="Nodedr OrderRestro" width="520">
+<img src="apps/web/public/logo.png" alt="OrderRestro logo" width="120">
 
 <img src="docs/orderrestro-cover.jpg" alt="Illustrative evening scene in an independent restaurant" width="100%">
 
@@ -20,6 +20,7 @@ dine-in, takeaway, delivery and kitchen operations.
 [![CasaOS / ZimaOS](https://img.shields.io/badge/CasaOS%20%2F%20ZimaOS-one--click%20app-1F6FEB)](casaos/README.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 [![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](./ROADMAP.md)
+[![Sponsor](https://img.shields.io/badge/sponsor-Raktim94-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Raktim94)
 
 Developed by [NodeDR Infotech Private Limited](https://www.nodedr.com/)
 
@@ -27,6 +28,7 @@ Developed by [NodeDR Infotech Private Limited](https://www.nodedr.com/)
 
 <p align="center">
   <a href="https://orderrestro.nodedr.com/"><img src="https://img.shields.io/badge/Go%20to%20the%20OrderRestro%20website-orderrestro.nodedr.com-E0234E?style=for-the-badge" alt="Go to the OrderRestro website"></a>
+  <a href="https://play.google.com/store/apps/details?id=com.nodedr.orderrestro&pcampaignid=web_share"><img src="https://img.shields.io/badge/Get%20it%20on-Google%20Play-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white" alt="Get OrderRestro on Google Play"></a>
 </p>
 
 <p align="center">
@@ -34,6 +36,7 @@ Developed by [NodeDR Infotech Private Limited](https://www.nodedr.com/)
 </p>
 
 
+[Install](#install-orderrestro) ·
 [Quick Start](#quick-start) ·
 [How to use](#how-to-use-orderrestro) ·
 [Full tutorial](./TUTORIAL.md) ·
@@ -46,6 +49,31 @@ Developed by [NodeDR Infotech Private Limited](https://www.nodedr.com/)
 </div>
 
 ---
+
+## Install OrderRestro
+
+Pick the one that fits. The server (back office, tills, kitchen display) runs on a PC, mini PC, NAS or VPS; the phone app connects to it or works offline on its own.
+
+| Where | Install |
+| --- | --- |
+| **Android phone / tablet** | [Get it on Google Play](https://play.google.com/store/apps/details?id=com.nodedr.orderrestro&pcampaignid=web_share) (package `com.nodedr.orderrestro`) |
+| **Ubuntu / Debian server** (amd64, arm64) | `curl -fsSL https://orderrestro.nodedr.com/install-linux.sh \| sudo bash`, then open `http://<server>:1995` |
+| **Any Linux / macOS / WSL2 with Docker** | `git clone https://github.com/Raktim94/nodedr-restaurant-pos.git && cd nodedr-restaurant-pos && ./install.sh` |
+| **CasaOS / ZimaOS** | App Store, then **Install a customized app**, and paste `https://raw.githubusercontent.com/Raktim94/nodedr-restaurant-pos/master/casaos/docker-compose.yml` ([steps](casaos/README.md)) |
+| **Windows 10/11** | [Get it from the Microsoft Store](https://apps.microsoft.com/detail/9NRG9BVFCMN5), or run `winget install --id 9NRG9BVFCMN5 --source msstore` in PowerShell ([build notes](windows/msix/README.md)) |
+| **Downloads and checksums** | [Latest release](https://github.com/Raktim94/nodedr-restaurant-pos/releases/latest) (`.deb` for amd64 and arm64, with `.sha256` files) |
+
+After the server is up, open it in a browser and create your restaurant at `/signup`. Details, Docker setup and manual install are in [Quick start](#quick-start).
+
+## Integrate with AI Coding Agents
+
+Building a restaurant website or app on OrderRestro? Point your coding agent at [`prompts/AI_INTEGRATION_PROMPT.md`](prompts/AI_INTEGRATION_PROMPT.md) (verified endpoints, scopes, server-side Next.js pattern, MCP setup, test checklist). See also [`AGENTS.md`](AGENTS.md) and [`llms.txt`](llms.txt).
+
+## Watch OrderRestro on YouTube
+
+[![Watch the 17-minute OrderRestro walkthrough](https://img.youtube.com/vi/L7nXdduvExc/hqdefault.jpg)](https://youtu.be/L7nXdduvExc)
+
+See the full walkthrough, from setup and menu pricing to orders, kitchen service, and reports.
 
 ## What this is
 
@@ -142,25 +170,25 @@ by phase.
 
 | | Module | Status |
 |---|---|---|
-| 1 | POS & Billing — dine-in/takeaway, bill merge, multi-region tax (India GST, US Sales Tax, EU VAT, Spain IVA), discounts, gift cards, tips, payments, refunds; equal split is display-only and split tender is pending | ✅ core · 🚧 split billing/payment |
-| 2 | Table & Reservation Management — visual floor plan, booking, waitlist, QR table ordering, table transfer | ✅ |
+| 1 | POS & Billing — dine-in/takeaway, bill merge, **split bill by guest (by line or quantity)**, several payment methods on one bill, multi-region tax (India GST, US Sales Tax, EU VAT, Spain IVA), discounts, gift cards, tips, payments, refunds; see [docs/SPLIT-BILLING.md](docs/SPLIT-BILLING.md) | ✅ |
+| 2 | Table & Reservation Management — visual floor plan with saved layouts, bulk table tools, booking, waitlist, **QR / NFC table ordering protected by a live table code staff open (a photo of the QR cannot order)**, table transfer, paging buzzers | ✅ |
 | 3 | Kitchen Management (KDS) — display, KOTs, multi-station routing, prep tracking, performance reporting | ✅ |
 | 4 | Menu Management — categories, modifier groups, combos, seasonal menus, availability scheduling | ✅ |
-| 5 | Inventory & Store Management — ingredients, recipe costing, POs, suppliers, GRN, waste, batch/lot | ✅ |
-| 6 | Procurement — vendor quotations, purchase requests/orders, invoices, supplier payments, and supplier performance | ✅ core · 🚧 returns, price variance, reorder suggestions |
+| 5 | Inventory & Store Management — stock journal, **daily production and manufacturing costs (actual quantities, extra costs, cost per unit, optional menu-price change with history and reports)**, stock take, shopping list, expiry, stock areas and transfers, POs, suppliers, GRN, food waste, batch/lot | ✅ |
+| 6 | Procurement — vendor quotations, purchase requests/orders, invoices, supplier payments, supplier performance, **purchase returns with supplier credit, price-variance check, and a shopping list that counts stock on order**; see [docs/PROCUREMENT.md](docs/PROCUREMENT.md) | ✅ |
 | 7 | CRM — profiles, loyalty points, **referral rewards (share a dish or link, points for both sides, redeem at checkout)**, memberships, gift vouchers, feedback, visit history | ✅ |
-| 8 | Staff Management — accounts & roles, attendance (clock in/out), shift scheduling with clash checks, leave, payroll from clocked hours, tip pool split by hours | ✅ |
+| 8 | Staff Management — accounts & roles, attendance (clock in/out, also offline on the phone), shift scheduling, leave, payroll from clocked hours with breaks, overtime, late/absence rules and a worked-out payslip, tip pool split by hours | ✅ |
 | 9 | Accounting — expenses, nightly cash close with variance, profit & loss, balance sheet, budgets vs actual, bank-statement reconciliation, tax summary by rate | ✅ |
-| 10 | Delivery Management — zones by pincode, fee/minimum/ETA, driver assignment, status flow | ✅ · 🚧 live GPS, 3rd-party platforms |
-| 11 | Online Ordering — QR table ordering with modifiers, call waiter, request bill, click & collect, scheduled orders | ✅ |
+| 10 | Delivery Management — zones by pincode, fee/minimum/ETA, driver assignment, status flow, rider position, and a **customer tracking link** (distance and rough arrival while the rider is live); platform orders via a signed webhook; see [docs/DELIVERY-TRACKING.md](docs/DELIVERY-TRACKING.md) | ✅ · 🚧 direct Zomato/Swiggy API clients and a live map (need partner credentials / a map provider) |
+| 11 | Online Ordering — QR table ordering with modifiers, pay at the register or on the phone (held from the kitchen until paid), no duplicate orders, call waiter, request bill, **customer ratings after a paid order**, click & collect, scheduled orders | ✅ |
 | 12 | Branch Management — branch switcher, cross-branch overview, branch-to-branch stock transfers | ✅ |
 | 13 | Analytics — live dashboard plus 18 reports (peak hours, food cost & margins, retention…) with print, CSV, Excel and PDF export, and scheduled report emails | ✅ |
 | 14 | Marketing — coupons, happy-hour discounts, email (your SMTP) / SMS / WhatsApp campaigns with opt-out | ✅ |
-| 15 | Finance — daily cash closing, expenses, monthly budgets | ✅ · 🚧 petty cash, expense approvals |
+| 15 | Finance — daily cash closing, expenses with approval (submit, approve or reject with a reason, audit trail), petty cash box (top-ups, vouchers, counts), monthly budgets; see [docs/FINANCE.md](docs/FINANCE.md) | ✅ |
 | 16 | Maintenance — equipment register, service schedules with overdue flags | ✅ |
 | 17 | Documents — SOPs, contracts, recipes, purchase paperwork, with file attachments (PDF, images, Office) | ✅ |
 | 18 | Security — RBAC, audit log, two-factor sign-in with recovery codes, backup/restore, session expiry, PIN login | ✅ |
-| 19 | Integrations — **UPI QR payments with payment-received sound**, customer-facing second screen, direct-USB ESC/POS printing + cash drawer, signed webhooks, SMTP email, REST/Swagger and [API & MCP server](./docs/integrations-api.md) | ✅ · payment-gateway checkout (Razorpay, Stripe, Cashfree — see [docs](./docs/PAYMENT-GATEWAYS.md)) · 🚧 accounting & delivery-platform connectors |
+| 19 | Integrations — **UPI QR payments with payment-received sound**, customer-facing second screen, direct-USB ESC/POS printing + cash drawer, signed webhooks, SMTP email, REST/Swagger and [API & MCP server](./docs/integrations-api.md) | ✅ · payment-gateway checkout (Razorpay, Stripe, Cashfree — see [docs](./docs/PAYMENT-GATEWAYS.md)) · **accounting journal export (CSV/Excel)**, see [docs/ACCOUNTING-EXPORT.md](docs/ACCOUNTING-EXPORT.md) · 🚧 live Tally/Zoho/QuickBooks connectors (need each customer's account) |
 | 20 | Admin Panel — restaurant/branch settings, per-branch tax regime, UPI payee, roles, permissions | ✅ |
 
 Already shipped and running against real Docker/Postgres today: auth +
@@ -180,8 +208,49 @@ a Settings area (restaurant + branch details, per-branch tax regime — India
 GST/US Sales Tax/EU VAT/Spain IVA, tax-inclusive or -exclusive menu
 pricing) and staff account management (create/deactivate staff, assign
 roles) under **Settings** in the sidebar, photo upload on menu items, and
-an English/Spanish/French language switcher on the guest-facing QR
-ordering page and staff sidebar.
+a language switcher for English, Spanish, French and Brazilian Portuguese in the staff dashboard
+and on the guest QR ordering page. Staff can switch languages from the top bar while working.
+The browser remembers the choice. Restaurant records, including customer and dish names, keep
+the text entered by staff.
+
+### What's new in 1.47.0
+
+The staff dashboard follows the language picker on every page; a Paused view in Menu; paid bills, refunds, supplier payments and points history are never lost when an order, invoice or customer is deleted. See [CHANGELOG-1.47.0](docs/CHANGELOG-1.47.0.md).
+
+### What's new in 1.46.0
+
+Pause a dish until a return time; safer offline sync (a paging bug that could skip rows is fixed, and edits two devices disagree on are kept for review); backup restores verify checksums. See [CHANGELOG-1.46.0](docs/CHANGELOG-1.46.0.md) and [OFFLINE-ARCHITECTURE](docs/OFFLINE-ARCHITECTURE.md).
+
+### What's new in 1.45.0
+
+Split a bill by guest, purchase returns with supplier credit, a price-variance check, a better shopping list, a customer delivery tracking link, a balanced accounting journal export, expense approvals and a petty cash box, and reports that reach back five years with a read-only bill view. See [CHANGELOG-1.45.0](docs/CHANGELOG-1.45.0.md).
+
+### What's new in 1.44.0
+
+Reports rebuilt: a day book listing every bill with totals, drill-down from each day to its bills, quick date ranges and totals in every export. Order history searches any date range, admins can delete a finished bill from its detail window, and the Audit Log can be exported and can no longer be edited or deleted by anyone. See [CHANGELOG-1.44.0](docs/CHANGELOG-1.44.0.md).
+
+### What's new (1.42.1 and 1.42.2)
+
+Integrity and safety fixes from the November 2026 pull-request review (1.42.2 also fixes a rare checkout stall that 1.42.1 could show when several payments for one bill arrived at the same moment; update straight to 1.42.2):
+
+- **Two tills can no longer overpay one bill.** Partial and final payments on the same open bill are serialised; a retried request is a replay, never a second charge.
+- **Gift-card refunds credit exactly what the refund says.** A refund to a gift card is capped at what was paid by card (a ₹100 bill paid ₹60 card + ₹40 cash can send at most ₹60 back to the card) and is refused on bills paid without one.
+- **Online-payment refunds are safer.** An unclear answer from the provider (timeout, 409, 429, 5xx) keeps the hold for review instead of risking a second refund, a provider-pending refund stays reconcilable, and owners can close a reviewed entry from Settings → Payments.
+- **Permissions:** a DENY override now also removes a permission that was only implied by another one, and editing someone's overrides respects the same "nobody can touch an account stronger than their own" rule as roles.
+- **Reports and accounting:** the GST report reconciles to the tax stored on each bill (loyalty points are tender, not a discount); bank lines that are money-in can't be matched to an expense, and one expense can't back two bank lines.
+- **Customer dues** cover every open bill without loading them all at once; if the detail list is capped the page says so and the totals still include everything.
+- **Stock:** goods received into negative stock keep the balance equal to the movement history; a stock take sent twice applies once; emptying the recipe of a recipe-tracked dish is refused.
+- **Phone POS:** a failed save during checkout no longer leaves stock half-deducted, and restoring a backup (including older ones) continues receipt, order and KOT numbering instead of restarting at 001.
+- **Stored credentials:** the S3 backup secret and the sync API key are now encrypted at rest (existing values keep working and are re-encrypted the next time they are saved).
+- **CI** now runs the manufacturing e2e suite that a flag-matching bug had been skipping.
+
+### What's new (1.31)
+
+- **Manufacturing costs.** Record a production batch from what was really used and made, add labour/packaging/fuel, and see the cost per finished unit. Posting is one transaction; history never changes when prices change later. Optionally set the menu selling price from the same screen (separate permission, conflict-safe, with price history). Reports by day, item, ingredient, cost category, and price changes. Mobile-first five-step flow.
+- **Live table sessions.** The printed QR (or NFC card) only shows the menu. Staff open the table and give guests a short code; orders need it, and it dies when the bill is paid or staff reset it.
+- **Customer ratings** tied to a paid order, one per order, with an admin view.
+- **Customer-facing screen with adverts**, **paging buzzers**, a **hardware simulator**, saved **floor layouts**, **stock areas**, **stock take** and **shopping list**, and phones that work **offline** for sales, production, waste, stock receipts and clock in/out.
+- **Collapsible navigation**.
 
 ## Why OrderRestro
 
@@ -272,9 +341,11 @@ Yes — every report exports to Excel, PDF or CSV, and can be emailed on a
 daily, weekly or monthly schedule through your own SMTP server.
 
 **What is not built yet?** Gateways beyond Razorpay, Stripe and Cashfree
-(and refunds from inside OrderRestro), direct
-accounting-software and delivery-platform connectors, weighing-scale and
-label printers, a SQLite edition and native installers. The
+(Cashfree refunds are made in the Cashfree dashboard; Razorpay and Stripe
+refunds are sent from OrderRestro), direct accounting-software and
+delivery-platform connectors, weighing-scale and label printers, and a SQLite
+edition. Linux (`.deb`), Android and Windows (MSIX) installers exist; see
+[Install](#install-orderrestro). The
 [roadmap](./ROADMAP.md) is explicit about what is done and what is not.
 
 ## Tech stack
@@ -298,7 +369,7 @@ Postgres over the originally-specced SQLite — is in
 | Tables | TanStack Table |
 | Charts | Recharts |
 | Drag & drop | dnd-kit (floor designer, KDS columns) |
-| i18n | Lightweight client-side context (`apps/web/lib/i18n`) — English/Spanish/French so far, no routing/middleware |
+| i18n | Lightweight client-side context (`apps/web/lib/i18n`) — English, Spanish, French and Brazilian Portuguese, no routing/middleware |
 | Auth | JWT (httpOnly cookie) + PIN quick-switch, optional TOTP 2FA |
 | Containers | Docker + Docker Compose |
 
@@ -364,11 +435,13 @@ git clone https://github.com/Raktim94/nodedr-restaurant-pos.git && cd nodedr-res
 
 [`install.sh`](install.sh) generates a `.env` with random secrets (only if
 one doesn't already exist — safe to re-run), builds the backend + web Docker
-images, starts the stack, and waits for the backend to report healthy. Re-run
-it any time after `git pull` to rebuild.
+images, starts the stack, and waits up to 90 seconds for the backend to report healthy. Re-run
+it any time after `git pull` to rebuild. Run `./install.sh --help` to see the
+available options before starting an installation.
 
-Open **http://localhost:1995** and create your restaurant at `/signup` — no
-demo data is loaded by default. To try the app with sample data instead, run
+Open the URL printed by the installer (**http://localhost:1995** by default)
+and create your restaurant at `/signup` — no demo data is loaded by default.
+To try the app with sample data instead, run
 `./install.sh --demo` and sign in with `owner@demo.local` / `Password123!`.
 
 The backend API and Swagger docs are reachable only through the web app's
@@ -397,7 +470,7 @@ pnpm install
 docker compose up -d postgres
 cp apps/backend/.env.example apps/backend/.env   # point DATABASE_URL at your Postgres
 pnpm --filter @nodedr-restaurant/types build
-cd apps/backend && npx prisma migrate dev && npx ts-node prisma/seed.ts && cd ../..
+(cd apps/backend && pnpm exec prisma migrate dev && pnpm exec prisma db seed)
 pnpm dev   # runs backend (:4001) and web (:1995) together via Turborepo
 ```
 
@@ -453,6 +526,7 @@ docs/           Screenshots and supplementary docs
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | Tech-stack decisions and the reasoning behind each one |
 | [`ROADMAP.md`](./ROADMAP.md) | Phased build plan / living TODO — checkboxes are the real status |
 | [`DESIGN_SYSTEM.md`](./DESIGN_SYSTEM.md) | Visual language, tokens, type scale, component inventory, per-surface UX notes |
+| [`docs/CUSTOMER-DUES.md`](./docs/CUSTOMER-DUES.md) | Part payments, credit bills, the customer dues view, later payments and WhatsApp reminders |
 | [`casaos/README.md`](./casaos/README.md) | CasaOS/ZimaOS one-click install, image publishing, official app store submission steps |
 | [`windows/msix/README.md`](./windows/msix/README.md) | Windows MSIX desktop client — what it is/isn't, build/validate instructions, capabilities, what's CI-verified vs. not tested on real hardware |
 | [`ACCESSIBILITY.md`](./ACCESSIBILITY.md) | WCAG 2.1 AA target, what's implemented, testing methodology, known gaps |
@@ -496,6 +570,22 @@ docs/           Screenshots and supplementary docs
   logging uses the same function with `allowNegative: false`, since it has
   no such urgency. See `apps/backend/src/modules/inventory/stock.service.ts`.
 
+## Sponsor OrderRestro
+
+OrderRestro is free: no subscription, no per-terminal fee, no paywalled features, and your data stays on your own server. It stays that way because people back it.
+
+If it saves your restaurant time or money, please consider sponsoring. Your support pays for:
+
+- faster releases and fixes for the bugs restaurants report
+- testing on real phones, printers and kitchen hardware
+- more languages, payment gateways and delivery integrations
+- security reviews, dependency updates and long-term upkeep
+- hosting for the website, demo and downloads
+
+[![Sponsor OrderRestro](https://img.shields.io/badge/Sponsor%20OrderRestro-%E2%9D%A4-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Raktim94)
+
+Can't sponsor? Starring the repo, telling another restaurant owner, reporting a bug or sending a translation helps just as much. Sponsoring never changes the license or unlocks hidden features. More at [orderrestro.nodedr.com/sponsor](https://orderrestro.nodedr.com/sponsor).
+
 ## Contributing
 
 Contributions are very welcome — this is early-stage with a lot of open
@@ -507,6 +597,8 @@ changes without silently re-litigating a decision already recorded in
 `PROJECT.md`/`ARCHITECTURE.md`.
 
 This project follows the [Contributor Covenant](./CODE_OF_CONDUCT.md).
+
+Thanks to everyone who has contributed: see [CONTRIBUTORS.md](./CONTRIBUTORS.md).
 
 ## License
 

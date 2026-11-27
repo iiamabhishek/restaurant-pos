@@ -14,13 +14,13 @@ import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { useLogin } from "@/hooks/use-auth";
-import { api, ApiError } from "@/lib/api";
-
-type Branding = { name: string | null; logoUrl: string | null };
+import { useDemoInfo } from "@/hooks/use-demo";
+import { ApiError } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
   const login = useLogin();
+  const { data: demo } = useDemoInfo();
   // Set once the server says this account uses two-factor authentication.
   const [needsCode, setNeedsCode] = useState(false);
   // Shown inline under the form (a toast vanishes before it can be read).
@@ -180,6 +180,9 @@ export default function LoginPage() {
           <Button type="submit" className="mt-2 h-12 text-base" disabled={login.isPending}>
             {login.isPending ? "Signing in…" : "Sign in"}
           </Button>
+          {demo?.demo && (
+            <Link href="/demo" className="inline-flex h-12 items-center justify-center rounded-lg border border-border text-base font-medium hover:bg-muted">Try the live demo (no password)</Link>
+          )}
         </form>
 
         <p className="mt-8 text-center text-xs text-muted-foreground">

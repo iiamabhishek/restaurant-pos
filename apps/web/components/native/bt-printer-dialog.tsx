@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { Bluetooth, Printer, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -17,6 +18,7 @@ import {
  * the first time someone prints, and Settings > Printer opens it to change.
  */
 export function BtPrinterDialog() {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [devices, setDevices] = useState<BtPrinter[]>([]);
   const [info, setInfo] = useState<string | null>(null);
@@ -31,16 +33,16 @@ export function BtPrinterDialog() {
     try {
       const r = await np.btPrinters();
       setDevices(r.devices);
-      if (!r.supported) setInfo("This phone has no Bluetooth.");
-      else if (!r.enabled) setInfo("Bluetooth is off. Turn it on, then tap Refresh.");
+      if (!r.supported) setInfo(t("This phone has no Bluetooth."));
+      else if (!r.enabled) setInfo(t("Bluetooth is off. Turn it on, then tap Refresh."));
       else if (r.devices.length === 0)
-        setInfo("No paired printers yet. Pair the printer in the phone's Bluetooth settings, then tap Refresh.");
+        setInfo(t("No paired printers yet. Pair the printer in the phone's Bluetooth settings, then tap Refresh."));
     } catch (e) {
-      setInfo(e instanceof Error ? e.message : typeof e === "string" ? e : "Could not read the paired devices.");
+      setInfo(e instanceof Error ? e.message : typeof e === "string" ? e : t("Could not read the paired devices."));
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(
     () =>
@@ -65,12 +67,11 @@ export function BtPrinterDialog() {
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Bluetooth className="h-5 w-5" aria-hidden /> Choose a Bluetooth printer
+            <Bluetooth className="h-5 w-5" aria-hidden /> {t("Choose a Bluetooth printer")}
           </DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground">
-          Switch the printer on and pair it once in the phone&apos;s Bluetooth settings. Pick it here and bills and
-          kitchen tickets print straight from this phone.
+          {t("Switch the printer on and pair it once in the phone's Bluetooth settings. Pick it here and bills and kitchen tickets print straight from this phone.")}
         </p>
         <ul className="flex max-h-72 flex-col gap-2 overflow-y-auto">
           {devices.map((d) => (
@@ -95,10 +96,10 @@ export function BtPrinterDialog() {
         )}
         <div className="flex justify-between gap-2">
           <Button type="button" variant="ghost" onClick={() => finish(null)}>
-            Cancel
+            {t("Cancel")}
           </Button>
           <Button type="button" variant="outline" onClick={() => void load()} disabled={busy}>
-            <RefreshCw className="h-4 w-4" aria-hidden /> {busy ? "Looking…" : "Refresh"}
+            <RefreshCw className="h-4 w-4" aria-hidden /> {busy ? t("Looking…") : t("Refresh")}
           </Button>
         </div>
       </DialogContent>

@@ -10,8 +10,10 @@
 <body>
 <main>
   <img class="logo" src="assets/logo.png" alt="" width="72" height="72">
-  <h1>Connect to your restaurant</h1>
-  <p class="sub">Enter the address of your OrderRestro server. Staff and riders use the same sign-in as the web app.</p>
+  <section id="connectbox">
+  <h1>Set up OrderRestro</h1>
+  <p class="sub">Choose once. You can change it later in the app.</p>
+  <h2 class="opt-title">Connect to my restaurant server</h2>
   <form id="f" class="card" novalidate>
     <label for="local">Local address</label>
     <input id="local" name="local" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="192.168.1.20">
@@ -21,10 +23,16 @@
     <p class="hint">Only if the server has a public https address. The app uses it when you are away from the restaurant, and switches by itself.</p>
     <button class="btn" id="go" type="submit">Connect</button>
     <button class="btn ghost" id="scan" type="button" hidden>Scan QR code</button>
+    <p id="status" class="msg" role="status" aria-live="polite" hidden></p>
     <p id="msg" class="msg" role="alert" hidden></p>
   </form>
   <div id="recent" class="recent" hidden></div>
-  <button class="btn ghost" id="standalone" type="button" hidden style="margin-top:1rem">No server yet? Use the app on this phone</button>
+  <p class="or">or</p>
+  <button class="choice" id="pick-offline" type="button">
+    <b>Use on this phone, no server</b>
+    <span>Start selling in a minute. Everything stays on this phone and works with no internet. Connect a server later.</span>
+  </button>
+  </section>
   <p class="foot"><span id="ver"></span> · <a href="https://orderrestro.nodedr.com/privacy">Privacy</a> · <a href="https://orderrestro.nodedr.com/">orderrestro.nodedr.com</a></p>
 </main>
 <script src="connect.js"></script>

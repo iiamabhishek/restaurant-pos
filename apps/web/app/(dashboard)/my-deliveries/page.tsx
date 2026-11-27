@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Bike, CheckCircle2, ChefHat, MapPin, Navigation, Phone, ShoppingBag, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -27,7 +29,7 @@ interface NativeGeo {
   clearWatch: (o: { id: string }) => Promise<void>;
 }
 
-const money = (n: number) => `₹${Number.isInteger(n) ? n : n.toFixed(2)}`;
+
 const FAIL_REASONS = ["Customer not reachable", "Wrong or incomplete address", "Customer refused the order", "Could not find the place"];
 
 /** Shares the phone's position every ~20 s while the rider is on duty. */
@@ -88,13 +90,15 @@ function useLiveLocation(online: boolean) {
 }
 
 function DeliveryCard({ c, busy, onStatus }: { c: RiderCard; busy: boolean; onStatus: (s: "PICKED_UP" | "DELIVERED" | "FAILED", reason?: string) => void }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const [failing, setFailing] = useState(false);
   const toPickup = c.status === "ASSIGNED";
   return (
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-base font-semibold text-foreground">Order #{c.orderNumber.split("-").pop()}</h3>
-        <Badge variant={toPickup ? "secondary" : "default"}>{toPickup ? "Go to restaurant" : "Deliver to customer"}</Badge>
+        <h3 className="text-base font-semibold text-foreground">{t("Order #{pop}", { pop: (c.orderNumber.split("-").pop()) ?? "" })}</h3>
+        <Badge variant={toPickup ? "secondary" : "default"}>{toPickup ? t("Go to restaurant") : t("Deliver to customer")}</Badge>
       </div>
 
       <div className="flex items-start gap-2 text-sm">
@@ -104,7 +108,7 @@ function DeliveryCard({ c, busy, onStatus }: { c: RiderCard; busy: boolean; onSt
           {c.pickup.address && <p className="text-muted-foreground">{c.pickup.address}</p>}
           <p className={`mt-0.5 inline-flex items-center gap-1 text-xs ${c.foodReady ? "text-success" : "text-warning"}`}>
             <ChefHat className="h-3.5 w-3.5" aria-hidden />
-            {c.foodReady ? "Food is ready" : "Food is being prepared"}
+            {c.foodReady ? t("Food is ready") : t("Food is being prepared")}
           </p>
         </div>
       </div>
@@ -112,13 +116,13 @@ function DeliveryCard({ c, busy, onStatus }: { c: RiderCard; busy: boolean; onSt
       <div className="flex items-start gap-2 text-sm">
         <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0">
-          <p className="font-medium text-foreground">{c.customer.name ?? "Customer"}</p>
+          <p className="font-medium text-foreground">{c.customer.name ?? t("Customer")}</p>
           <p className="break-words text-muted-foreground">
             {c.address}
             {c.pincode ? `, ${c.pincode}` : ""}
           </p>
-          {c.location.place && <p className="break-words text-foreground">Landmark: {c.location.place}</p>}
-          {c.location.lat != null && <p className="text-xs text-success">Customer shared their exact location</p>}
+          {c.location.place && <p className="break-words text-foreground">{t("Landmark: {place}", { place: c.location.place })}</p>}
+          {c.location.lat != null && <p className="text-xs text-success">{t("Customer shared their exact location")}</p>}
         </div>
       </div>
 
@@ -130,10 +134,10 @@ function DeliveryCard({ c, busy, onStatus }: { c: RiderCard; busy: boolean; onSt
           </li>
         ))}
       </ul>
-      {c.notes && <p className="text-xs text-muted-foreground">Note: {c.notes}</p>}
+      {c.notes && <p className="text-xs text-muted-foreground">{t("Note: {notes}", { notes: c.notes })}</p>}
 
       <p className={`rounded-lg px-3 py-2 text-sm font-medium ${c.amountToCollect > 0 ? "bg-warning/15 text-foreground" : "bg-success/15 text-foreground"}`}>
-        {c.amountToCollect > 0 ? `Collect ${money(c.amountToCollect)} from the customer` : "Already paid. Collect nothing."}
+        {c.amountToCollect > 0 ? t("Collect {money} from the customer", { money: fmt.currency(c.amountToCollect) }) : t("Already paid. Collect nothing.")}
       </p>
 
       <div className="grid grid-cols-2 gap-2">
@@ -144,42 +148,42 @@ function DeliveryCard({ c, busy, onStatus }: { c: RiderCard; busy: boolean; onSt
           className={`${buttonVariants({ variant: "outline" })} h-11`}
         >
           <Navigation className="mr-2 h-4 w-4" aria-hidden />
-          Navigate
+          {t("Navigate")}
         </a>
         {c.customer.phone ? (
           <a href={`tel:${c.customer.phone}`} className={`${buttonVariants({ variant: "outline" })} h-11`}>
             <Phone className="mr-2 h-4 w-4" aria-hidden />
-            Call customer
+            {t("Call customer")}
           </a>
         ) : (
           <Button variant="outline" className="h-11" disabled>
-            No phone
+            {t("No phone")}
           </Button>
         )}
       </div>
 
       {toPickup ? (
         <Button className="h-12 text-base" disabled={busy} onClick={() => onStatus("PICKED_UP")}>
-          Picked up the order
+          {t("Picked up the order")}
         </Button>
       ) : failing ? (
-        <div className="flex flex-col gap-2" role="group" aria-label="Why could it not be delivered?">
-          <p className="text-sm font-medium text-foreground">Why could it not be delivered?</p>
+        <div className="flex flex-col gap-2" role="group" aria-label={t("Why could it not be delivered?")}>
+          <p className="text-sm font-medium text-foreground">{t("Why could it not be delivered?")}</p>
           {FAIL_REASONS.map((r) => (
             <Button key={r} variant="outline" className="h-11 justify-start" disabled={busy} onClick={() => onStatus("FAILED", r)}>
-              {r}
+              {t(r)}
             </Button>
           ))}
           <Button variant="ghost" onClick={() => setFailing(false)}>
-            Back
+            {t("Back")}
           </Button>
         </div>
       ) : (
         <div className="grid grid-cols-[1fr_auto] gap-2">
           <Button className="h-12 text-base" disabled={busy} onClick={() => onStatus("DELIVERED")}>
-            Delivered{c.amountToCollect > 0 ? ` · cash ${money(c.amountToCollect)} collected` : ""}
+            {t("Delivered")}{c.amountToCollect > 0 ? t(" · cash {money} collected", { money: fmt.currency(c.amountToCollect) }) : ""}
           </Button>
-          <Button variant="outline" className="h-12" aria-label="Could not deliver" disabled={busy} onClick={() => setFailing(true)}>
+          <Button variant="outline" className="h-12" aria-label={t("Could not deliver")} disabled={busy} onClick={() => setFailing(true)}>
             <XCircle className="h-5 w-5" aria-hidden />
           </Button>
         </div>
@@ -189,6 +193,7 @@ function DeliveryCard({ c, busy, onStatus }: { c: RiderCard; busy: boolean; onSt
 }
 
 export default function MyDeliveriesPage() {
+  const { t } = useI18n();
   const me = useRiderMe();
   const online = !!me.data?.online;
   const deliveries = useRiderDeliveries(!!me.data);
@@ -215,12 +220,12 @@ export default function MyDeliveriesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, deliveries.data]);
 
-  const fail = (e: unknown) => setError(e instanceof ApiError ? e.message : "Something went wrong. Try again.");
+  const fail = (e: unknown) => setError(e instanceof ApiError ? e.message : t("Something went wrong. Try again."));
 
   if (me.isError) {
     return (
       <p role="alert" className="text-sm text-destructive">
-        {me.error instanceof ApiError ? me.error.message : "Could not load your deliveries."}
+        {me.error instanceof ApiError ? me.error.message : t("Could not load your deliveries.")}
       </p>
     );
   }
@@ -239,7 +244,7 @@ export default function MyDeliveriesPage() {
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-5">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">My deliveries</h1>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("My deliveries")}</h1>
         <p className="flex items-center gap-1 text-sm text-muted-foreground">
           <MapPin className="h-3.5 w-3.5" aria-hidden />
           {d.name} · {d.location.name}
@@ -248,17 +253,17 @@ export default function MyDeliveriesPage() {
 
       <div className={`flex items-center justify-between rounded-2xl px-4 py-3 ${online ? "bg-success/15" : "bg-secondary"}`}>
         <div>
-          <p className="text-sm font-semibold text-foreground">{online ? "You are online" : "You are offline"}</p>
+          <p className="text-sm font-semibold text-foreground">{online ? t("You are online") : t("You are offline")}</p>
           <p className="text-xs text-muted-foreground" aria-live="polite">
-            {!online && "Go online to get deliveries"}
-            {online && gps === "ok" && "Sharing your live location"}
-            {online && gps === "denied" && "Allow location access so the restaurant can see you"}
-            {online && gps === "unavailable" && "Location is not available on this device"}
-            {online && gps === "off" && "Starting location…"}
+            {!online && t("Go online to get deliveries")}
+            {online && gps === "ok" && t("Sharing your live location")}
+            {online && gps === "denied" && t("Allow location access so the restaurant can see you")}
+            {online && gps === "unavailable" && t("Location is not available on this device")}
+            {online && gps === "off" && t("Starting location…")}
           </p>
         </div>
         <Switch
-          aria-label="Go online"
+          aria-label={t("Go online")}
           checked={online}
           disabled={duty.isPending}
           onCheckedChange={(v) => {
@@ -274,30 +279,30 @@ export default function MyDeliveriesPage() {
       )}
 
       <dl className="grid grid-cols-3 gap-2 text-center">
-        {[
+        {([
           ["Active", d.today.active],
           ["Delivered today", d.today.delivered],
           ["Failed today", d.today.failed],
-        ].map(([label, n]) => (
+        ] as const).map(([label, n]) => (
           <div key={String(label)} className="rounded-xl border border-border p-3">
             <dd className="text-2xl font-semibold tabular-nums text-foreground">{n}</dd>
-            <dt className="text-[11px] text-muted-foreground">{label}</dt>
+            <dt className="text-[11px] text-muted-foreground">{t(label)}</dt>
           </div>
         ))}
       </dl>
 
       <section aria-labelledby="rd-active" className="flex flex-col gap-3">
         <h2 id="rd-active" className="text-base font-semibold text-foreground">
-          Your deliveries
+          {t("Your deliveries")}
         </h2>
         {deliveries.isLoading ? (
           <Skeleton className="h-40 rounded-2xl" />
         ) : active.length === 0 ? (
           <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-border px-4 py-10 text-center">
             <Bike className="h-8 w-8 text-muted-foreground" aria-hidden />
-            <p className="text-sm font-medium text-foreground">{online ? "Waiting for your next delivery" : "No deliveries right now"}</p>
+            <p className="text-sm font-medium text-foreground">{online ? t("Waiting for your next delivery") : t("No deliveries right now")}</p>
             <p className="text-xs text-muted-foreground">
-              {online ? "New orders appear here with a sound." : "Switch on “You are online” to receive orders."}
+              {online ? t("New orders appear here with a sound.") : t("Switch on “You are online” to receive orders.")}
             </p>
           </div>
         ) : (
@@ -318,17 +323,17 @@ export default function MyDeliveriesPage() {
       {done.length > 0 && (
         <section aria-labelledby="rd-done" className="flex flex-col gap-2">
           <h2 id="rd-done" className="text-base font-semibold text-foreground">
-            Done today
+            {t("Done today")}
           </h2>
           <ul className="flex flex-col divide-y divide-border rounded-xl border border-border">
             {done.map((c) => (
               <li key={c.id} className="flex items-center justify-between gap-3 px-3 py-2.5 text-sm">
                 <span className="min-w-0 truncate">
-                  #{c.orderNumber.split("-").pop()} · {c.customer.name ?? "Customer"}
+                  #{c.orderNumber.split("-").pop()} · {c.customer.name ?? t("Customer")}
                 </span>
                 <span className={`inline-flex shrink-0 items-center gap-1 text-xs ${c.status === "DELIVERED" ? "text-success" : "text-destructive"}`}>
                   {c.status === "DELIVERED" ? <CheckCircle2 className="h-4 w-4" aria-hidden /> : <XCircle className="h-4 w-4" aria-hidden />}
-                  {c.status === "DELIVERED" ? "Delivered" : "Failed"}
+                  {c.status === "DELIVERED" ? t("Delivered") : t("Failed")}
                 </span>
               </li>
             ))}

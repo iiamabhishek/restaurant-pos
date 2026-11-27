@@ -1,7 +1,9 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { kitchenProgress, type PaymentMethodDto } from "@nodedr-restaurant/types";
-import { ArrowLeft, CheckCircle2, ChefHat, Pencil, Printer } from "lucide-react";
+import { CheckCircle2, ChefHat, Pencil, Printer, QrCode } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { StatusNote, useNoteToast } from "@/components/ui/status-note";
@@ -10,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { QueryError } from "@/components/ui/query-error";
 import { OnlinePayment } from "@/components/pos/online-payment";
+import { BillShareDialog } from "@/components/pos/bill-share-dialog";
 import { PaymentMethodButtons } from "@/components/pos/payment-method-buttons";
 import { CustomerPicker } from "@/components/pos/customer-picker";
 import type { Customer } from "@/hooks/use-customers";
@@ -29,7 +32,6 @@ import { usePrintKot, usePrintOrderUsb, type PrintJobResult } from "@/hooks/use-
 import { useDisplaySettings } from "@/hooks/use-settings";
 import { api, ApiError } from "@/lib/api";
 import { discountSummary, parseMoney, planPayment } from "@/lib/bill";
-import { formatCurrency } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { publishDisplay } from "@/lib/customer-display";
 import { playPaymentReceived } from "@/lib/celebrate";
@@ -70,6 +72,8 @@ export function CheckoutPanel({
   initialCustomer?: Customer | null;
   onDone: () => void;
 }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   // The order passed in is a snapshot from when it was sent; the live copy
   // carries edits (removed lines, new totals), payments already taken, the
   // kitchen's progress, and a cancel/pay by someone else.
@@ -107,13 +111,14 @@ export function CheckoutPanel({
   const canDiscount = hasPermission(me?.user, "discounts.apply");
   const [cancelOpen, setCancelOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [shareOrderId, setShareOrderId] = useState<string | null>(null);
   const phone = canPrintOnDevice();
   const printUsb = usePrintOrderUsb(branchId);
   const printKot = usePrintKot(branchId);
   const onPrinted = (r: PrintJobResult) =>
     r.unsupportedChars?.length
-      ? toast.warning(`Sent, but ${r.unsupportedChars.join(" ")} cannot be printed by this printer's code page. Use browser print for the full text.`)
-      : toast.success("Sent to the thermal printer");
+      ? toast.warning(t("Sent, but {join} cannot be printed by this printer's code page. Use browser print for the full text.", { join: r.unsupportedChars.join(" ") }))
+      : toast.success(t("Sent to the thermal printer"));
   // First print sends only tickets not yet printed. If they already went out
   // (e.g. a double tap or retry) the server refuses to print a duplicate and we
   // offer an explicit, REPRINT-stamped copy instead.
@@ -123,16 +128,16 @@ export function CheckoutPanel({
       {
         onSuccess: (r) => {
           onPrinted(r);
-          if (reprint) toast.success("Reprint sent — marked REPRINT on paper");
+          if (reprint) toast.success(t("Reprint sent — marked REPRINT on paper"));
         },
         onError: (err) => {
           if (err instanceof ApiError && err.code === "ALREADY_PRINTED") {
-            toast.info("The kitchen ticket was already printed", {
-              action: { label: "Print a REPRINT", onClick: () => printKotNow(true) },
+            toast.info(t("The kitchen ticket was already printed"), {
+              action: { label: t("Print a REPRINT"), onClick: () => printKotNow(true) },
             });
             return;
           }
-          toast.error(err instanceof Error ? err.message : "Could not print to the kitchen printer");
+          toast.error(err instanceof Error ? err.message : t("Could not print to the kitchen printer"));
         },
       },
     );
@@ -168,6 +173,17 @@ export function CheckoutPanel({
   const bill: BillPreview | undefined = billQuery.data;
   const locked = (bill?.locked ?? false) || hasPayments;
   const repricing = adjustments !== settled;
+  // The preview already includes the current redemption, so add it back to get
+  // the amount available to redeem against. A point's value is configured per
+  // restaurant; using 1 here silently over-redeems when it is set to e.g. 2.
+  const pointValue = Number(settings?.restaurant.loyaltyPointValue ?? 0);
+  const preLoyaltyTotal = round2(
+    (bill?.totalDue ?? 0) + (bill?.loyaltyDiscountAmount ?? 0),
+  );
+  const maxRedeemablePoints =
+    pointValue > 0
+      ? Math.max(0, Math.floor(preLoyaltyTotal / pointValue))
+      : 0;
 
   // A coupon is checked when applied, so the bill above only ever sees a valid
   // code (or none) and never drops the happy-hour discount on an error.
@@ -179,7 +195,7 @@ export function CheckoutPanel({
       await api.post(`/orders/${order.id}/bill-preview?branchId=${branchId}`, { couponCode: code });
       setAppliedCoupon(code);
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not apply coupon");
+      toast.error(err instanceof ApiError ? err.message : t("Could not apply coupon"));
     }
   };
 
@@ -196,11 +212,14 @@ export function CheckoutPanel({
     try {
       const card = await lookupGiftCard(branchId, giftCardCode);
       if (!card) {
-        toast.error("No gift card found with that code");
+        toast.error(t("No gift card found with that code"));
         setGiftCardBalance(null);
         return;
       }
       setGiftCardBalance(Number(card.balance));
+    } catch {
+      setGiftCardBalance(null);
+      toast.error(t("Could not check the gift card. Check the connection and try again."));
     } finally {
       setCheckingGiftCard(false);
     }
@@ -227,6 +246,11 @@ export function CheckoutPanel({
     if (completed) return;
     if (upiUri) {
       publishDisplay({ kind: "upi", total: upiAmount, uri: upiUri, payee: upiName || "" });
+    } else {
+      // Switching to cash (or covering the balance with a gift card) must
+      // remove the QR from the customer screen, not leave the last amount
+      // showing while the cashier takes a different tender.
+      publishDisplay({ kind: "idle" });
     }
   }, [upiUri, upiAmount, upiName, completed]);
 
@@ -242,7 +266,9 @@ export function CheckoutPanel({
   };
 
   const handleCheckout = () => {
-    if (!bill || repricing) return;
+    // placeholderData keeps the previous bill on screen while the preview
+    // refetches. Never charge against those stale figures.
+    if (!bill || repricing || billQuery.isFetching) return;
     const payments =
       plan.applied > 0
         ? [
@@ -272,28 +298,28 @@ export function CheckoutPanel({
           if (result.settlement.fullyPaid) {
             setCompleted(result);
             publishDisplay({ kind: "paid", total: Number(result.totalAmount), method });
-            playPaymentReceived(formatCurrency(result.totalAmount));
-            toast.success("Payment recorded");
+            playPaymentReceived(fmt.currency(result.totalAmount));
+            toast.success(t("Payment recorded"));
           } else {
             toast.success(
-              `Part payment of ${formatCurrency(result.settlement.amountPaid)} recorded — ${formatCurrency(result.settlement.balanceDue)} still due`,
+              t("Part payment of {formatCurrency} recorded — {formatCurrency2} still due", { formatCurrency: fmt.currency(result.settlement.amountPaid), formatCurrency2: fmt.currency(result.settlement.balanceDue) }),
             );
           }
         },
         onError: (err) =>
-          toast.error(err instanceof ApiError ? err.message : "Checkout failed"),
+          toast.error(err instanceof ApiError ? err.message : t("Checkout failed")),
       },
     );
   };
 
-  const printBill = () => branchId && openReceiptPrint(order.id, branchId, locked ? {} : settled);
+  const printBill = () => branchId && openReceiptPrint(t, order.id, branchId, locked ? {} : settled);
   const printBillThermal = () =>
     printUsb.mutate(
       { orderId: order.id, adjustments: locked ? {} : settled },
       {
         onSuccess: onPrinted,
         onError: (err) =>
-          toast.error(err instanceof Error ? err.message : "Could not print to the thermal printer"),
+          toast.error(err instanceof Error ? err.message : t("Could not print to the thermal printer")),
       },
     );
 
@@ -303,29 +329,23 @@ export function CheckoutPanel({
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
         <StatusNote note={note} onClear={clearNote} className="w-full text-left" />
         <CheckCircle2 className="h-10 w-10 text-success" />
-        <p className="text-lg font-semibold text-foreground">
-          Order #{order.orderNumber} paid
-        </p>
+        <p className="text-lg font-semibold text-foreground">{t("Order #{orderNumber} paid", { orderNumber: order.orderNumber })}</p>
         <p className="text-2xl font-semibold tabular-nums text-foreground">
-          {formatCurrency(completed.totalAmount)}
+          {fmt.currency(completed.totalAmount)}
         </p>
         {settlement.changeDue > 0 && (
-          <p className="rounded-lg bg-success/10 px-4 py-2 text-lg font-semibold tabular-nums text-success">
-            Change due {formatCurrency(settlement.changeDue)}
-          </p>
+          <p className="rounded-lg bg-success/10 px-4 py-2 text-lg font-semibold tabular-nums text-success">{t("Change due {formatCurrency}", { formatCurrency: fmt.currency(settlement.changeDue) })}</p>
         )}
         {Number(completed.loyaltyDiscountAmount) > 0 && (
-          <p className="text-xs text-muted-foreground">
-            {completed.loyaltyPointsRedeemed} points redeemed
-          </p>
+          <p className="text-xs text-muted-foreground">{t("{loyaltyPointsRedeemed} points redeemed", { loyaltyPointsRedeemed: completed.loyaltyPointsRedeemed })}</p>
         )}
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
           <Button
             variant="outline"
             className="h-11"
-            onClick={() => branchId && openReceiptPrint(completed.id, branchId)}
+            onClick={() => branchId && openReceiptPrint(t, completed.id, branchId)}
           >
-            {phone ? "Print / Save PDF" : "Print receipt (browser)"}
+            {phone ? t("Print / Save PDF") : t("Print receipt (browser)")}
           </Button>
           <Button
             variant="outline"
@@ -335,14 +355,25 @@ export function CheckoutPanel({
               printUsb.mutate({ orderId: completed.id, drawer: completed.payments?.some((p) => p.method === "CASH") }, {
                 onSuccess: onPrinted,
                 onError: (err) =>
-                  toast.error(err instanceof Error ? err.message : "Could not print to the thermal printer"),
+                  toast.error(err instanceof Error ? err.message : t("Could not print to the thermal printer")),
               })
             }
           >
-            {printUsb.isPending ? "Printing…" : phone ? "Bluetooth receipt" : "Thermal receipt"}
+            {printUsb.isPending ? t("Printing…") : phone ? t("Bluetooth receipt") : t("Thermal receipt")}
           </Button>
-          <Button className="h-11" onClick={onDone}>New order</Button>
+          <Button variant="outline" className="h-11" onClick={() => setShareOrderId(completed.id)}>
+            <QrCode className="h-4 w-4" />
+            {t("Share receipt (QR)")}
+          </Button>
+          <Button className="h-11" onClick={onDone}>{t("New order")}</Button>
         </div>
+        <BillShareDialog
+          orderId={shareOrderId ?? ""}
+          branchId={branchId}
+          adjustments={{}}
+          open={!!shareOrderId}
+          onOpenChange={(o) => !o && setShareOrderId(null)}
+        />
       </div>
     );
   }
@@ -352,42 +383,31 @@ export function CheckoutPanel({
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
         <StatusNote note={note} onClear={clearNote} className="w-full text-left" />
-        <p className="text-sm font-medium text-foreground">
-          Order #{order.orderNumber} was {order.status === "CANCELLED" ? "cancelled" : "already paid"}
+        <p className="text-sm font-medium text-foreground">{t("Order #{orderNumber} was", { orderNumber: order.orderNumber })} {order.status === "CANCELLED" ? t("cancelled") : t("already paid")}
         </p>
         <p className="text-xs text-muted-foreground">
           {order.status === "CANCELLED"
-            ? "The kitchen tickets were withdrawn and the table is free again. The order stays in History."
-            : "Nothing more to do here."}
+            ? t("The kitchen tickets were withdrawn and the table is free again. The order stays in History.")
+            : t("Nothing more to do here.")}
         </p>
-        <Button className="h-11" onClick={onDone}>Done</Button>
+        <Button className="h-11" onClick={onDone}>{t("Done")}</Button>
       </div>
     );
   }
 
   const kitchen = live ? kitchenProgress(live.kots.map((k) => k.status)) : null;
   const paidSoFar = live?.payments ?? [];
-  const partialLabel = `Record partial payment · ${formatCurrency(plan.applied)}`;
+  const partialLabel = t("Record partial payment · {currency}", { currency: fmt.currency(plan.applied) });
 
   return (
     <div className="flex h-full flex-col gap-5 overflow-y-auto">
       <StatusNote note={note} onClear={clearNote} />
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="-ml-2 shrink-0 text-muted-foreground"
-          onClick={onDone}
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back
-        </Button>
         <div className="flex flex-wrap justify-end gap-2">
           {canEditRole && !locked && (
             <Button type="button" variant="outline" size="sm" onClick={() => setEditOpen(true)}>
               <Pencil className="h-4 w-4" />
-              Edit bill
+              {t("Edit bill")}
             </Button>
           )}
           {canCancelRole && !locked && (
@@ -398,7 +418,7 @@ export function CheckoutPanel({
               className="text-destructive hover:text-destructive"
               onClick={() => setCancelOpen(true)}
             >
-              Cancel order
+              {t("Cancel order")}
             </Button>
           )}
         </div>
@@ -415,11 +435,11 @@ export function CheckoutPanel({
       <div>
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
-            <p className="text-sm text-muted-foreground">Order #{order.orderNumber} sent to kitchen</p>
+            <p className="text-sm text-muted-foreground">{t("Order #{orderNumber} sent to kitchen", { orderNumber: order.orderNumber })}</p>
             {kitchen && (
               <p className="mt-0.5 flex items-center gap-1.5 text-xs font-medium text-foreground">
                 <ChefHat className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
-                {KITCHEN_LABEL[kitchen]}
+                {fmt.label(KITCHEN_LABEL[kitchen])}
               </p>
             )}
           </div>
@@ -429,10 +449,10 @@ export function CheckoutPanel({
             variant="outline"
             size="sm"
             className="shrink-0"
-            onClick={() => branchId && openKotPrint(order.id, branchId)}
+            onClick={() => branchId && openKotPrint(t, order.id, branchId)}
           >
             <Printer className="h-4 w-4" />
-            {phone ? "KOT / PDF" : "KOT (browser)"}
+            {phone ? t("KOT / PDF") : t("KOT (browser)")}
           </Button>
           <Button
             type="button"
@@ -443,31 +463,30 @@ export function CheckoutPanel({
             onClick={() => printKotNow(false)}
           >
             <Printer className="h-4 w-4" />
-            {printKot.isPending ? "Printing…" : phone ? "KOT (Bluetooth)" : "KOT (thermal)"}
+            {printKot.isPending ? t("Printing…") : phone ? t("KOT (Bluetooth)") : t("KOT (thermal)")}
           </Button>
           </div>
         </div>
         {!locked && (
           <p className="mt-2 rounded-lg bg-secondary/60 px-3 py-2 text-xs text-muted-foreground">
-            No need to pay right now — tap <span className="font-medium text-foreground">Back</span> to
-            help another table and come bill this one later from here or the Tables page.
+            {t("No need to pay right now — use the buttons at the top to go back, and bill this one later from here or the Tables page.")}
           </p>
         )}
       </div>
 
       {paidSoFar.length > 0 && (
         <div className="rounded-xl border border-border px-3 py-2">
-          <p className="text-xs font-medium text-muted-foreground">Payments so far</p>
+          <p className="text-xs font-medium text-muted-foreground">{t("Payments so far")}</p>
           <ul className="mt-1 flex flex-col gap-0.5 text-sm">
             {paidSoFar.map((p) => (
               <li key={p.id} className="flex justify-between tabular-nums">
-                <span>{p.method}</span>
-                <span>{formatCurrency(p.amount)}</span>
+                <span>{fmt.code(p.method)}</span>
+                <span>{fmt.currency(p.amount)}</span>
               </li>
             ))}
           </ul>
           <p className="mt-1 text-xs text-muted-foreground">
-            Discount, tip and points are locked until this bill is settled.
+            {t("Discount, tip and points are locked until this bill is settled.")}
           </p>
         </div>
       )}
@@ -477,8 +496,8 @@ export function CheckoutPanel({
       <div className="grid grid-cols-2 gap-4">
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
-            <Label htmlFor="discount">Discount</Label>
-            <div role="group" aria-label="Discount type" className="flex overflow-hidden rounded-lg border border-border text-xs">
+            <Label htmlFor="discount">{t("Discount")}</Label>
+            <div role="group" aria-label={t("Discount type")} className="flex overflow-hidden rounded-lg border border-border text-xs">
               {(["PERCENT", "FLAT"] as const).map((m) => (
                 <button
                   key={m}
@@ -494,7 +513,7 @@ export function CheckoutPanel({
                     discountMode === m ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-secondary",
                   )}
                 >
-                  {m === "PERCENT" ? "%" : "₹ Cash"}
+                  {m === "PERCENT" ? "%" : t("Amount")}
                 </button>
               ))}
             </div>
@@ -511,7 +530,7 @@ export function CheckoutPanel({
             onChange={(e) => setDiscountValue(e.target.value)}
           />
           {canDiscount && !locked && (
-            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Discount presets">
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label={t("Discount presets")}>
               {(discountMode === "PERCENT" ? [5, 10, 15, 20] : [10, 20, 50, 100]).map((v) => (
                 <button
                   key={v}
@@ -519,18 +538,18 @@ export function CheckoutPanel({
                   onClick={() => setDiscountValue(String(v))}
                   className="min-h-8 rounded-full border border-border px-2.5 text-xs text-muted-foreground transition-colors hover:bg-secondary"
                 >
-                  {discountMode === "PERCENT" ? `${v}%` : `₹${v}`}
+                  {discountMode === "PERCENT" ? `${v}%` : fmt.currency(v)}
                 </button>
               ))}
             </div>
           )}
           {!canDiscount && (
-            <p className="text-[11px] text-muted-foreground">Your role cannot apply discounts.</p>
+            <p className="text-[11px] text-muted-foreground">{t("Your role cannot apply discounts.")}</p>
           )}
           {canDiscount && !locked && Number(discountValue) > 0 && (
             <Input
-              aria-label="Discount reason"
-              placeholder="Reason for discount"
+              aria-label={t("Discount reason")}
+              placeholder={t("Reason for discount")}
               maxLength={200}
               className="h-9 text-sm"
               value={discountReason}
@@ -539,7 +558,7 @@ export function CheckoutPanel({
           )}
         </div>
         <div className="flex flex-col gap-2">
-          <Label htmlFor="tip">Tip</Label>
+          <Label htmlFor="tip">{t("Tip")}</Label>
           <Input
             id="tip"
             type="number"
@@ -555,22 +574,22 @@ export function CheckoutPanel({
       {customer && customer.loyaltyPoints > 0 && !locked && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
-            <Label htmlFor="points">Redeem loyalty points</Label>
+            <Label htmlFor="points">{t("Redeem loyalty points")}</Label>
             <button
               type="button"
               className="text-xs font-medium text-primary hover:underline"
               onClick={() =>
-                setPointsToRedeem(String(Math.min(customer.loyaltyPoints, Math.floor(bill?.totalDue ?? 0))))
+                setPointsToRedeem(
+                  String(Math.min(customer.loyaltyPoints, maxRedeemablePoints)),
+                )
               }
-            >
-              Max ({customer.loyaltyPoints} available)
-            </button>
+            >{t("Max ({loyaltyPoints} available)", { loyaltyPoints: customer.loyaltyPoints })}</button>
           </div>
           <Input
             id="points"
             type="number"
             min="0"
-            max={customer.loyaltyPoints}
+            max={Math.min(customer.loyaltyPoints, maxRedeemablePoints)}
             className="h-11"
             value={pointsToRedeem}
             onChange={(e) => setPointsToRedeem(e.target.value)}
@@ -580,14 +599,14 @@ export function CheckoutPanel({
 
       {canDiscount && !locked && (
         <div className="flex flex-col gap-2">
-          <Label htmlFor="coupon">Coupon code (optional)</Label>
+          <Label htmlFor="coupon">{t("Coupon code (optional)")}</Label>
           <div className="flex gap-2">
             <Input
               id="coupon"
               className="h-11"
               value={couponInput}
               onChange={(e) => setCouponInput(e.target.value)}
-              placeholder="e.g. SAVE10"
+              placeholder={t("e.g. SAVE10")}
             />
             <Button
               type="button"
@@ -596,7 +615,7 @@ export function CheckoutPanel({
               disabled={!couponInput.trim() && !appliedCoupon}
               onClick={applyCoupon}
             >
-              Apply
+              {t("Apply")}
             </Button>
           </div>
         </div>
@@ -604,7 +623,7 @@ export function CheckoutPanel({
 
       {!locked && (
         <div className="flex flex-col gap-2">
-          <Label htmlFor="gift-card">Gift card code (optional)</Label>
+          <Label htmlFor="gift-card">{t("Gift card code (optional)")}</Label>
           <div className="flex gap-2">
             <Input
               id="gift-card"
@@ -614,7 +633,7 @@ export function CheckoutPanel({
                 setGiftCardCode(e.target.value);
                 setGiftCardBalance(null);
               }}
-              placeholder="e.g. 8A7B629E8EEA"
+              placeholder={t("e.g. 8A7B629E8EEA")}
             />
             <Button
               type="button"
@@ -623,13 +642,11 @@ export function CheckoutPanel({
               disabled={!giftCardCode || checkingGiftCard}
               onClick={checkGiftCard}
             >
-              {checkingGiftCard ? "…" : "Check"}
+              {checkingGiftCard ? "…" : t("Check")}
             </Button>
           </div>
           {giftCardBalance !== null && (
-            <p className="text-xs text-success">
-              Balance {formatCurrency(giftCardBalance)} — applying {formatCurrency(giftCardApplied)}
-            </p>
+            <p className="text-xs text-success">{t("Balance {formatCurrency} — applying {formatCurrency2}", { formatCurrency: fmt.currency(giftCardBalance), formatCurrency2: fmt.currency(giftCardApplied) })}</p>
           )}
         </div>
       )}
@@ -637,7 +654,7 @@ export function CheckoutPanel({
       {billQuery.isError && !bill ? (
         <QueryError
           error={billQuery.error}
-          what="the bill"
+          what={t("the bill")}
           onRetry={() => void billQuery.refetch()}
           retrying={billQuery.isFetching}
         />
@@ -645,14 +662,14 @@ export function CheckoutPanel({
         <>
           {remainingDue > 0 && (
             <div className="flex flex-col gap-2">
-              <Label>Payment method</Label>
+              <Label>{t("Payment method")}</Label>
               <PaymentMethodButtons methods={METHODS} value={method} onChange={setMethod} />
             </div>
           )}
 
           {remainingDue > 0 && (
             <div className="flex flex-col gap-2">
-              <Label htmlFor="amount">{method === "CASH" ? "Cash received" : "Amount to pay now"}</Label>
+              <Label htmlFor="amount">{method === "CASH" ? t("Cash received") : t("Amount to pay now")}</Label>
               <Input
                 id="amount"
                 type="number"
@@ -665,19 +682,13 @@ export function CheckoutPanel({
                 onChange={(e) => setAmountText(e.target.value)}
               />
               {plan.valid && plan.change > 0 && (
-                <p className="rounded-lg bg-success/10 px-3 py-2 text-base font-semibold tabular-nums text-success" role="status">
-                  Change due {formatCurrency(plan.change)}
-                </p>
+                <p className="rounded-lg bg-success/10 px-3 py-2 text-base font-semibold tabular-nums text-success" role="status">{t("Change due {formatCurrency}", { formatCurrency: fmt.currency(plan.change) })}</p>
               )}
               {plan.valid && plan.partial && (
-                <p className="rounded-lg bg-warning/10 px-3 py-2 text-sm text-warning" role="status">
-                  Part payment — {formatCurrency(plan.balanceAfter)} will stay due and the table stays open.
-                </p>
+                <p className="rounded-lg bg-warning/10 px-3 py-2 text-sm text-warning" role="status">{t("Part payment — {formatCurrency} will stay due and the table stays open.", { formatCurrency: fmt.currency(plan.balanceAfter) })}</p>
               )}
               {plan.clamped && (
-                <p className="text-xs text-muted-foreground" role="status">
-                  {method} can only pay the balance ({formatCurrency(remainingDue)}); only that will be charged.
-                </p>
+                <p className="text-xs text-muted-foreground" role="status">{t("{method} can only pay the balance ({formatCurrency}); only that will be charged.", { method: fmt.code(method), formatCurrency: fmt.currency(remainingDue) })}</p>
               )}
             </div>
           )}
@@ -687,14 +698,12 @@ export function CheckoutPanel({
               {upiUri ? (
                 <>
                   <QRCodeSVG value={upiUri} size={176} level="M" marginSize={1} />
-                  <p className="text-xs font-medium text-[#17251d]">
-                    Scan with any UPI app · {formatCurrency(upiAmount)} pre-filled
-                  </p>
-                  <p className="text-[11px] text-neutral-500">Also shown on the customer display</p>
+                  <p className="text-xs font-medium text-[#17251d]">{t("Scan with any UPI app · {formatCurrency} pre-filled", { formatCurrency: fmt.currency(upiAmount) })}</p>
+                  <p className="text-[11px] text-neutral-500">{t("Also shown on the customer display")}</p>
                 </>
               ) : (
                 <p className="text-center text-xs text-neutral-600">
-                  No UPI id set yet. <Link href="/settings" className="font-medium underline">Add your UPI id in Settings → Restaurant</Link> to show a payment QR here.
+                  {t("No UPI id set yet.")} <Link href="/settings" className="font-medium underline">{t("Add your UPI id in Settings → Restaurant")}</Link> {t("to show a payment QR here.")}
                 </p>
               )}
             </div>
@@ -704,7 +713,7 @@ export function CheckoutPanel({
 
           <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
             <Label htmlFor="split" className="text-xs text-muted-foreground">
-              Split between
+              {t("Split between")}
             </Label>
             <div className="flex items-center gap-2">
               <Input
@@ -715,14 +724,11 @@ export function CheckoutPanel({
                 onChange={(e) => setSplitCount(e.target.value)}
                 className="h-8 w-16 text-center"
               />
-              <span className="text-xs text-muted-foreground">guests</span>
+              <span className="text-xs text-muted-foreground">{t("guests")}</span>
             </div>
           </div>
           {split > 1 && bill && (
-            <p className="-mt-2 text-center text-xs text-muted-foreground">
-              {formatCurrency(round2(balance / split))} each — enter each guest&apos;s share as a part
-              payment, or collect separately and complete payment once for the whole table.
-            </p>
+            <p className="-mt-2 text-center text-xs text-muted-foreground">{t("{formatCurrency} each — enter each guest's share as a part payment, or collect separately and complete payment once for the whole table.", { formatCurrency: fmt.currency(round2(balance / split)) })}</p>
           )}
         </>
       )}
@@ -737,10 +743,10 @@ export function CheckoutPanel({
             className="h-11"
             disabled={!bill}
             onClick={printBill}
-            title="Prints the bill for the guest. Nothing is charged and the table stays open."
+            title={t("Prints the bill for the guest. Nothing is charged and the table stays open.")}
           >
             <Printer className="h-4 w-4" />
-            {phone ? "Print / Save PDF" : "Print bill"}
+            {phone ? t("Print / Save PDF") : t("Print bill")}
           </Button>
           <Button
             type="button"
@@ -748,10 +754,10 @@ export function CheckoutPanel({
             className="h-11"
             disabled={!bill || printUsb.isPending}
             onClick={printBillThermal}
-            title="Prints the bill on the thermal printer. Nothing is charged and the cash drawer stays shut."
+            title={t("Prints the bill on the thermal printer. Nothing is charged and the cash drawer stays shut.")}
           >
             <Printer className="h-4 w-4" />
-            {printUsb.isPending ? "Printing…" : phone ? "Print bill (Bluetooth)" : "Print bill (thermal)"}
+            {printUsb.isPending ? t("Printing…") : phone ? t("Print bill (Bluetooth)") : t("Print bill (thermal)")}
           </Button>
         </div>
 
@@ -761,20 +767,29 @@ export function CheckoutPanel({
       <div className="sticky bottom-0 z-10 -mx-1 bg-card px-1 pb-1 pt-2 max-lg:border-t max-lg:border-border max-lg:shadow-[0_-8px_12px_-10px_rgba(0,0,0,0.25)]">
         <Button
           className="h-12 w-full text-base"
-          disabled={checkout.isPending || !bill || repricing || !plan.valid}
+          disabled={
+            checkout.isPending || !bill || repricing || billQuery.isFetching || !plan.valid
+          }
           onClick={handleCheckout}
         >
           {checkout.isPending
-            ? "Processing…"
+            ? t("Processing…")
             : plan.partial
               ? partialLabel
               : plan.change > 0
-                ? `Complete payment · change ${formatCurrency(plan.change)}`
+                ? t("Complete payment · change {formatCurrency}", { formatCurrency: fmt.currency(plan.change) })
                 : bill
-                  ? `Complete payment · ${formatCurrency(bill.totalDue)}`
-                  : "Complete payment"}
+                  ? t("Complete payment · {formatCurrency}", { formatCurrency: fmt.currency(bill.totalDue) })
+                  : t("Complete payment")}
         </Button>
       </div>
+      <BillShareDialog
+        orderId={shareOrderId ?? ""}
+        branchId={branchId}
+        adjustments={locked ? {} : settled}
+        open={!!shareOrderId}
+        onOpenChange={(o) => !o && setShareOrderId(null)}
+      />
     </div>
   );
 }
@@ -789,52 +804,54 @@ function BillSummary({
   giftCardApplied: number;
   pending: boolean;
 }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   if (!bill) {
-    return <p className="text-sm text-muted-foreground">Pricing the bill…</p>;
+    return <p className="text-sm text-muted-foreground">{t("Pricing the bill…")}</p>;
   }
   const source = bill.couponCode
-    ? `coupon ${bill.couponCode}`
+    ? t("coupon {couponCode}", { couponCode: bill.couponCode })
     : bill.promotionName
       ? bill.promotionName
       : bill.discountType === "FIXED"
-        ? "flat discount"
+        ? t("flat discount")
         : null;
   return (
     <div className={pending ? "opacity-70" : undefined} aria-busy={pending}>
       <dl className="flex flex-col gap-1 text-sm">
-        <Row label="Subtotal" value={formatCurrency(bill.subtotal)} />
+        <Row label={t("Subtotal")} value={fmt.currency(bill.subtotal)} />
         {bill.discountAmount > 0 && (
           <Row
-            label={`Discount${source ? ` (${source})` : ""}`}
-            value={`− ${discountSummary(bill.discountPercent, bill.discountAmount, formatCurrency)}`}
+            label={t("Discount{value}", { value: source ? ` (${source})` : "" })}
+            value={`− ${discountSummary(bill.discountPercent, bill.discountAmount, fmt.currency, (value) => fmt.percent(value, Number.isInteger(value) ? 0 : 2))}`}
             accent
           />
         )}
-        <Row label="Tax (included)" value={formatCurrency(bill.taxAmount)} muted />
+        <Row label={t("Tax (included)")} value={fmt.currency(bill.taxAmount)} muted />
         {bill.loyaltyDiscountAmount > 0 && (
           <Row
-            label={`Loyalty (${bill.loyaltyPointsRedeemed} pts)`}
-            value={`− ${formatCurrency(bill.loyaltyDiscountAmount)}`}
+            label={t("Loyalty ({loyaltyPointsRedeemed} pts)", { loyaltyPointsRedeemed: bill.loyaltyPointsRedeemed })}
+            value={`− ${fmt.currency(bill.loyaltyDiscountAmount)}`}
             accent
           />
         )}
-        {bill.tipAmount > 0 && <Row label="Tip" value={formatCurrency(bill.tipAmount)} />}
-        {bill.deliveryFee > 0 && <Row label="Delivery fee" value={formatCurrency(bill.deliveryFee)} />}
+        {bill.tipAmount > 0 && <Row label={t("Tip")} value={fmt.currency(bill.tipAmount)} />}
+        {bill.deliveryFee > 0 && <Row label={t("Delivery fee")} value={fmt.currency(bill.deliveryFee)} />}
       </dl>
       <div className="mt-2 flex items-center justify-between border-t border-border pt-2">
-        <span className="text-sm font-medium text-foreground">Total due</span>
-        <span className="text-lg font-semibold tabular-nums text-foreground">{formatCurrency(bill.totalDue)}</span>
+        <span className="text-sm font-medium text-foreground">{t("Total due")}</span>
+        <span className="text-lg font-semibold tabular-nums text-foreground">{fmt.currency(bill.totalDue)}</span>
       </div>
       {bill.amountPaid > 0 && (
         <dl className="mt-1 flex flex-col gap-1 text-sm">
-          <Row label="Paid so far" value={formatCurrency(bill.amountPaid)} />
+          <Row label={t("Paid so far")} value={fmt.currency(bill.amountPaid)} />
         </dl>
       )}
-      {giftCardApplied > 0 && <Row label="Gift card" value={`− ${formatCurrency(giftCardApplied)}`} accent />}
+      {giftCardApplied > 0 && <Row label={t("Gift card")} value={`− ${fmt.currency(giftCardApplied)}`} accent />}
       <div className="mt-1 flex items-center justify-between">
-        <span className="text-sm text-muted-foreground">Balance due</span>
+        <span className="text-sm text-muted-foreground">{t("Balance due")}</span>
         <span className="text-base font-semibold tabular-nums text-foreground">
-          {formatCurrency(Math.max(round2(bill.balanceDue - giftCardApplied), 0))}
+          {fmt.currency(Math.max(round2(bill.balanceDue - giftCardApplied), 0))}
         </span>
       </div>
     </div>

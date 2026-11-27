@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import type { TableStatusDto } from "@nodedr-restaurant/types";
 import { ClipboardList, Merge, Plus, QrCode, Users } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -46,6 +48,8 @@ export function TableTile({
   branchId: string | null;
   style?: React.CSSProperties;
 }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const router = useRouter();
   const updateStatus = useUpdateTableStatus(branchId);
   const [qrOpen, setQrOpen] = useState(false);
@@ -73,42 +77,40 @@ export function TableTile({
           )}
         </DropdownMenuTrigger>
         <DropdownMenuContent>
-          <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
-            {STATUS_LABEL[table.status]} · {table.capacity} guests
-          </div>
+          <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">{t("{value} · {capacity} guests", { value: fmt.label(STATUS_LABEL[table.status]), capacity: table.capacity })}</div>
           {(Object.keys(STATUS_LABEL) as TableStatusDto[]).map((status) => (
             <DropdownMenuItem
               key={status}
               disabled={status === table.status}
               onClick={() => updateStatus.mutate({ id: table.id, status })}
             >
-              {STATUS_LABEL[status]}
+              {fmt.label(STATUS_LABEL[status])}
             </DropdownMenuItem>
           ))}
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => setQrOpen(true)}>
             <QrCode className="h-4 w-4" />
-            View QR code
+            {t("View QR code")}
           </DropdownMenuItem>
           {(table.status === "AVAILABLE" || table.status === "RESERVED") && (
             <DropdownMenuItem onClick={() => router.push(`/pos?tableId=${table.id}`)}>
               <Plus className="h-4 w-4" />
-              New order
+              {t("New order")}
             </DropdownMenuItem>
           )}
           {table.status === "OCCUPIED" && (
             <>
               <DropdownMenuItem onClick={() => router.push(`/pos?tableId=${table.id}`)}>
                 <Plus className="h-4 w-4" />
-                Add another round
+                {t("Add another round")}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => setBillOpen(true)}>
                 <ClipboardList className="h-4 w-4" />
-                Bill this table
+                {t("Bill this table")}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => setMergeOpen(true)}>
                 <Merge className="h-4 w-4" />
-                Merge another table&apos;s bill here
+                {t("Merge another table's bill here")}
               </DropdownMenuItem>
             </>
           )}

@@ -12,8 +12,17 @@ on:
     branches: [master]
     paths:
       - "scripts/quickstart.*"
+      - "scripts/test-install.py"
       - "install.sh"
       - "docker-compose.yml"
+      - ".github/workflows/install-smoke.yml"
+  pull_request:
+    paths:
+      - "scripts/quickstart.*"
+      - "scripts/test-install.py"
+      - "install.sh"
+      - "docker-compose.yml"
+      - "apps/**/Dockerfile"
       - ".github/workflows/install-smoke.yml"
 
 permissions:
@@ -24,9 +33,48 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
+      - uses: actions/checkout@v4
+      - name: Installer regression tests
+        run: python3 scripts/test-install.py
+      - name: Installer honors a host port override
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        env:
+          HOST_PORT: "2995"
+        run: |
+          mkdir installer-port-test
+          cd installer-port-test
+          cp "$GITHUB_WORKSPACE/install.sh" .
+          echo 'HOST_PORT=1995' > .env
+          cat > compose.yaml <<'YAML'
+          services:
+            web:
+              image: busybox:1.37
+              ports: ["127.0.0.1:${HOST_PORT}:3000"]
+              command: sh -c 'mkdir -p /www/api && echo ok > /www/api/health && exec httpd -f -p 3000 -h /www'
+          YAML
+          trap 'docker compose down' EXIT
+          ./install.sh | tee install.log
+          grep -Fx "Open http://localhost:$HOST_PORT" install.log
       - name: One-line install (as published)
+        if: github.event_name != 'pull_request'
         working-directory: ${{ runner.temp }}
         run: curl -fsSL https://raw.githubusercontent.com/Raktim94/nodedr-restaurant-pos/master/scripts/quickstart.sh | bash
+      - name: Linux quickstart reuses Docker with the required permissions
+        if: github.event_name == 'pull_request'
+        run: bash scripts/quickstart.test.sh
+      - name: Install from this checkout (PR)
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ runner.temp }}
+        env:
+          # Let quickstart clone the checked-out PR revision, including a detached merge commit.
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.file://${{ github.workspace }}.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/Raktim94/nodedr-restaurant-pos.git
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/quickstart.sh"
+          test "$(git -C nodedr-restaurant-pos rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: App answers on port 1995
         run: |

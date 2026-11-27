@@ -28,6 +28,8 @@ import { MarketingService } from '../marketing/marketing.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 import { resolveProfile } from './escpos/encoder';
 import { PrismaService } from '../../prisma/prisma.service';
+import { assertMenuItemsAvailable } from '../menu/item-availability';
+import { zonedRange } from '../../common/time';
 import { RealtimeGateway } from '../../realtime/realtime.gateway';
 import {
   computeOrderTotals,
@@ -36,6 +38,7 @@ import {
   toEffectiveInclusiveUnitPrice,
 } from './pricing';
 import {
+  affordableLoyaltyPoints,
   computeBill,
   assertManualDiscountAllowed,
   discountPercentOf,
@@ -43,13 +46,14 @@ import {
   settlePayments,
   type Bill,
 } from './settlement';
-import type { TaxMode } from '@nodedr-restaurant/types';
+import type { SplitOrderDto, TaxMode } from '@nodedr-restaurant/types';
 import {
   adjustOnlinePrice,
   type OnlinePriceAdjust,
 } from '../../common/online-price';
 import { ReferralsService } from '../referrals/referrals.service';
 import { VerifactuService } from '../verifactu/verifactu.service';
+import { fromMinor } from '../../payment-gateways/money';
 
 const KOT_FORWARD_STATUSES = [
   'ACCEPTED',
@@ -152,6 +156,22 @@ export class OrdersService {
     }
   }
 
+  /** Serialize a new sale with a staff pause; concurrent sales can share these locks. */
+  private async assertItemsForSale(
+    tx: Prisma.TransactionClient,
+    branchId: string,
+    ids: string[],
+  ) {
+    const items = await tx.$queryRaw<
+      { id: string; isActive: boolean; pausedUntil: Date | null }[]
+    >`
+      SELECT id, "isActive", "pausedUntil" FROM menu_items
+      WHERE "branchId" = ${branchId} AND id IN (${Prisma.join(ids)})
+      ORDER BY id FOR SHARE
+    `;
+    assertMenuItemsAvailable(ids, items);
+  }
+
   private async getBranchTaxMode(branchId: string): Promise<TaxMode> {
     const branch = await this.prisma.branch.findUnique({
       where: { id: branchId },
@@ -187,6 +207,9 @@ export class OrdersService {
        * kitchen, occupies a table or raises a "new order" alert.
        */
       historical?: { createdAt: Date };
+      /** Table self-ordering: how the guest will pay, and whether the kitchen waits for an online payment. */
+      payIntent?: 'CASH' | 'ONLINE';
+      heldForPayment?: boolean;
     } = {},
   ) {
     const channel = options.channel ?? 'STAFF';
@@ -204,7 +227,7 @@ export class OrdersService {
     if (channel === 'ONLINE')
       await this.assertOrderableOnWebsite(branchId, menuItemIds);
     const menuItems = await this.prisma.menuItem.findMany({
-      where: { id: { in: menuItemIds }, branchId },
+      where: { id: { in: menuItemIds }, branchId, isActive: true },
     });
     if (menuItems.length !== menuItemIds.length) {
       throw new BadRequestException(
@@ -235,7 +258,7 @@ export class OrdersService {
 
     const modifierIds = [...new Set(dto.items.flatMap((i) => i.modifierIds))];
     const modifiers = await this.prisma.modifier.findMany({
-      where: { id: { in: modifierIds } },
+      where: { id: { in: modifierIds }, isActive: true },
     });
     const modifierById = new Map(modifiers.map((m) => [m.id, m]));
     if (modifiers.length !== modifierIds.length) {
@@ -361,9 +384,13 @@ export class OrdersService {
       }
     }
 
-    const orderNumber = await this.nextOrderNumber(branchId);
-
     const order = await this.prisma.$transaction(async (tx) => {
+      // An offline sale already happened. A later pause cannot invalidate it on sync.
+      if (!options.historical)
+        await this.assertItemsForSale(tx, branchId, menuItemIds);
+      // The number is chosen inside the transaction under a per-branch, per-day lock. Choosing it before (read the latest,
+      // add one) let simultaneous orders pick the same number, and all but one were refused with a conflict.
+      const orderNumber = await this.nextOrderNumber(branchId, tx);
       const created = await tx.order.create({
         data: {
           branchId,
@@ -371,13 +398,17 @@ export class OrdersService {
           type: dto.type,
           channel,
           acceptance,
+          payIntent: options.payIntent ?? null,
+          heldForPayment: options.heldForPayment ?? false,
           tableId: dto.tableId,
           guestCount: dto.guestCount,
           customerId: dto.customerId,
           guestName: dto.guestName,
           notes: dto.notes,
           clientRequestId: options.clientRequestId,
-          ...(options.historical ? { createdAt: options.historical.createdAt } : {}),
+          ...(options.historical
+            ? { createdAt: options.historical.createdAt }
+            : {}),
           integrationKeyId: options.integrationKeyId,
           clientRequestHash: options.clientRequestHash,
           externalSource: options.externalSource,
@@ -412,6 +443,8 @@ export class OrdersService {
               quantity: line.cartItem.quantity,
               lineTotal: line.priced.lineTotal,
               kitchenNote: line.cartItem.kitchenNote,
+              // Half / Full / Custom as ordered (the name also says it); kept so a line can be told apart later.
+              portion: line.cartItem.portion ?? null,
               modifiers: {
                 create: line.selectedModifiers.map((m) => ({
                   modifier: { connect: { id: m.id } },
@@ -438,6 +471,7 @@ export class OrdersService {
       // the kitchen shortly before its time.
       if (
         acceptance !== 'PENDING' &&
+        !options.heldForPayment &&
         !this.isDeferred(scheduledFor) &&
         !options.historical
       ) {
@@ -475,7 +509,7 @@ export class OrdersService {
           entity: 'Order',
           entityId: full.id,
         });
-      } else {
+      } else if (!options.heldForPayment) {
         await this.notifications.notifyByPermission(branchId, 'kds.manage', {
           type: 'order.new',
           title: channel === 'ONLINE' ? 'New online order' : 'New order',
@@ -531,7 +565,7 @@ export class OrdersService {
     if (options.websiteOnly)
       await this.assertOrderableOnWebsite(branchId, menuItemIds);
     const menuItems = await this.prisma.menuItem.findMany({
-      where: { id: { in: menuItemIds }, branchId },
+      where: { id: { in: menuItemIds }, branchId, isActive: true },
     });
     if (menuItems.length !== menuItemIds.length) {
       throw new BadRequestException(
@@ -543,7 +577,7 @@ export class OrdersService {
 
     const modifierIds = [...new Set(items.flatMap((i) => i.modifierIds))];
     const modifiers = await this.prisma.modifier.findMany({
-      where: { id: { in: modifierIds } },
+      where: { id: { in: modifierIds }, isActive: true },
     });
     const modifierById = new Map(modifiers.map((m) => [m.id, m]));
     if (modifiers.length !== modifierIds.length) {
@@ -561,6 +595,8 @@ export class OrdersService {
     );
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      await this.assertOrderEditableInTx(tx, orderId);
+      await this.assertItemsForSale(tx, branchId, menuItemIds);
       const newItems = await Promise.all(
         lineInputs.map((line) =>
           tx.orderItem.create({
@@ -573,6 +609,8 @@ export class OrdersService {
               quantity: line.cartItem.quantity,
               lineTotal: line.priced.lineTotal,
               kitchenNote: line.cartItem.kitchenNote,
+              // Half / Full / Custom as ordered (the name also says it); kept so a line can be told apart later.
+              portion: line.cartItem.portion ?? null,
               modifiers: {
                 create: line.selectedModifiers.map((m) => ({
                   modifier: { connect: { id: m.id } },
@@ -603,7 +641,9 @@ export class OrdersService {
         },
       });
 
-      await this.generateKots(tx, orderId, branchId, newItems);
+      // An order still waiting for its online payment sends nothing to the kitchen, including extra rounds.
+      if (!order.heldForPayment)
+        await this.generateKots(tx, orderId, branchId, newItems);
 
       return result;
     });
@@ -625,9 +665,28 @@ export class OrdersService {
       tab?: 'pending' | 'active' | 'history';
       channel?: 'STAFF' | 'ONLINE';
       type?: string;
+      /** History tab: a custom date window (YYYY-MM-DD, inclusive) instead of the last 7 days. */
+      from?: string;
+      to?: string;
+      /** History tab: bill number or guest name contains this text. */
+      q?: string;
     },
   ) {
     const tab = filters.tab ?? 'active';
+    const branchRow = await this.prisma.branch.findUnique({
+      where: { id: branchId },
+      select: { restaurant: { select: { timezone: true } } },
+    });
+    const tz = branchRow?.restaurant.timezone ?? 'Asia/Kolkata';
+    const day = /^\d{4}-\d{2}-\d{2}$/;
+    const window =
+      filters.from &&
+      filters.to &&
+      day.test(filters.from) &&
+      day.test(filters.to)
+        ? zonedRange(filters.from, filters.to, tz)
+        : { gte: new Date(Date.now() - 7 * 86_400_000) };
+    const q = filters.q?.trim();
     const statusWhere: Prisma.OrderWhereInput =
       tab === 'pending'
         ? { status: 'OPEN', acceptance: 'PENDING' }
@@ -641,7 +700,7 @@ export class OrdersService {
                 { status: { in: ['PAID', 'CANCELLED'] } },
                 { acceptance: 'REJECTED' },
               ],
-              createdAt: { gte: new Date(Date.now() - 7 * 86_400_000) },
+              createdAt: window,
             };
     return this.prisma.order.findMany({
       where: {
@@ -649,11 +708,77 @@ export class OrdersService {
         ...statusWhere,
         ...(filters.channel ? { channel: filters.channel } : {}),
         ...(filters.type ? { type: filters.type as never } : {}),
+        ...(tab === 'history' && q
+          ? {
+              OR: [
+                { orderNumber: { contains: q, mode: 'insensitive' as const } },
+                { guestName: { contains: q, mode: 'insensitive' as const } },
+                {
+                  customer: {
+                    name: { contains: q, mode: 'insensitive' as const },
+                  },
+                },
+              ],
+            }
+          : {}),
       },
       include: { table: true, customer: true, items: true },
       orderBy: { createdAt: 'desc' },
-      take: 200,
+      take: tab === 'history' ? 500 : 200,
     });
+  }
+
+  /**
+   * Table self-ordering with online payment: the order waited for the money. Once it is paid (or staff decide to
+   * take it anyway) this sends it to the kitchen, exactly once. Returns false if there was nothing to release.
+   */
+  async releaseHeldOrder(branchId: string, orderId: string): Promise<boolean> {
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, branchId },
+      include: { items: true },
+    });
+    if (!order || !order.heldForPayment || order.status === 'CANCELLED')
+      return false;
+    const released = await this.prisma.$transaction(async (tx) => {
+      const flipped = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          heldForPayment: true,
+          status: { not: 'CANCELLED' },
+        },
+        data: { heldForPayment: false },
+      });
+      if (flipped.count === 0) return false;
+      await this.generateKots(tx, orderId, branchId, order.items);
+      return true;
+    });
+    if (!released) return false;
+    this.realtime.emitToBranch(branchId, 'order.created', {
+      id: orderId,
+      acceptance: order.acceptance,
+    });
+    this.realtime.emitToBranch(branchId, 'kot.updated', { orderId });
+    try {
+      await this.notifications.notifyByPermission(branchId, 'kds.manage', {
+        type: 'order.new',
+        title: 'New table order (paid)',
+        body: `Order ${order.orderNumber}`,
+        entity: 'Order',
+        entityId: orderId,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Failed to notify the kitchen about order ${orderId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    await this.audit.record({
+      userId: null,
+      action: 'order.released_to_kitchen',
+      entity: 'Order',
+      entityId: orderId,
+      metadata: { reason: 'payment confirmed or staff released' },
+    });
+    return true;
   }
 
   async acceptOrder(branchId: string, orderId: string, userId: string) {
@@ -757,32 +882,62 @@ export class OrdersService {
     }
 
     const ids = [...new Set(orderIds)];
-    const orders = await this.prisma.order.findMany({
-      where: { id: { in: ids }, branchId },
-      include: { items: true, payments: true },
-    });
-    if (orders.length !== ids.length) {
-      throw new NotFoundException('Some selected transactions no longer exist');
-    }
-    const live = orders.filter(
-      (o) => !['PAID', 'CANCELLED'].includes(o.status),
-    );
-    if (live.length > 0) {
-      throw new BadRequestException(
-        `Only finished transactions can be deleted — ${live
-          .map((o) => `#${o.orderNumber}`)
-          .join(', ')} still in progress`,
-      );
-    }
-
-    const invoiced = await this.verifactu.ordersWithRecords(ids);
-    if (invoiced.length > 0) {
-      throw new BadRequestException(
-        'Sales with a VERI*FACTU invoice cannot be deleted - the fiscal log must keep them. Refund the sale instead.',
-      );
-    }
-
+    if (!ids.length) return { deleted: 0 };
     await this.prisma.$transaction(async (tx) => {
+      // Keep the eligibility check and audit snapshot consistent with the
+      // delete. Acquire overlapping batch locks in the same order.
+      const lockedOrders = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM orders
+        WHERE "branchId" = ${branchId} AND id IN (${Prisma.join(ids)})
+        ORDER BY id FOR UPDATE
+      `;
+      if (lockedOrders.length !== ids.length) {
+        throw new NotFoundException(
+          'Some selected transactions no longer exist',
+        );
+      }
+      const orders = await tx.order.findMany({
+        where: { id: { in: ids }, branchId },
+        include: { items: true },
+      });
+      const live = orders.filter(
+        (o) => !['PAID', 'CANCELLED'].includes(o.status),
+      );
+      if (live.length > 0) {
+        throw new BadRequestException(
+          `Only finished transactions can be deleted — ${live
+            .map((o) => `#${o.orderNumber}`)
+            .join(', ')} still in progress`,
+        );
+      }
+
+      try {
+        // The database enforces the same retention rules for sync and SQL.
+        // A fiscal rejection below rolls back this entire batch as well.
+        await tx.order.deleteMany({ where: { id: { in: ids }, branchId } });
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === 'P2003' &&
+          [
+            'payments_orderId_fkey',
+            'refunds_orderId_fkey',
+            'gateway_order_history',
+          ].includes(String(error.meta?.constraint))
+        ) {
+          throw new ConflictException(
+            'Orders with payment or refund history cannot be deleted. Refund or void the transaction as appropriate, or review pending gateway activity.',
+          );
+        }
+        throw error;
+      }
+
+      const invoiced = await this.verifactu.ordersWithRecords(ids, tx);
+      if (invoiced.length > 0) {
+        throw new BadRequestException(
+          'Sales with a VERI*FACTU invoice cannot be deleted - the fiscal log must keep them. Refund the sale instead.',
+        );
+      }
       await tx.auditLog.createMany({
         data: orders.map((o) => ({
           userId: actor.id,
@@ -796,14 +951,10 @@ export class OrdersService {
             totalAmount: o.totalAmount.toString(),
             createdAt: o.createdAt.toISOString(),
             items: o.items.map((i) => `${i.quantity}x ${i.nameSnapshot}`),
-            payments: o.payments.map((p) => ({
-              method: p.method,
-              amount: p.amount.toString(),
-            })),
+            payments: [],
           },
         })),
       });
-      await tx.order.deleteMany({ where: { id: { in: ids }, branchId } });
     });
     this.realtime.emitToBranch(branchId, 'order.deleted', { orderIds: ids });
     return { deleted: ids.length };
@@ -826,6 +977,15 @@ export class OrdersService {
         where: { id: tableId },
         data: { status: 'AVAILABLE', statusSince: new Date() },
       });
+      // The next guests at this table need a fresh code: the old code and every phone that held it stop working.
+      await tx.tableSession.updateMany({
+        where: { tableId, status: 'ACTIVE' },
+        data: {
+          status: 'CLOSED',
+          closedAt: new Date(),
+          closedReason: 'Table cleared',
+        },
+      });
     }
   }
 
@@ -845,6 +1005,27 @@ export class OrdersService {
         printerPort: 9100,
       }
     );
+  }
+
+  /**
+   * Take the same order row lock checkout uses and re-check that no payment
+   * has landed since the validation read. Item edits, cancellation and merge
+   * all mutate a bill that checkout may be settling concurrently; without
+   * this a PAID total can be overwritten by a stale edit.
+   */
+  private async assertOrderEditableInTx(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ): Promise<void> {
+    const locked = await tx.order.updateMany({
+      where: { id: orderId, status: 'OPEN', payments: { none: {} } },
+      data: { updatedAt: new Date() },
+    });
+    if (locked.count === 0) {
+      throw new ConflictException(
+        'This bill was paid or changed by another request — refresh and retry',
+      );
+    }
   }
 
   // Cancels an unpaid order. Rules (unchanged): only OPEN orders, and not
@@ -930,10 +1111,12 @@ export class OrdersService {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      await this.assertOrderEditableInTx(tx, orderId);
       const flipped = await tx.order.updateMany({
         where: {
           id: orderId,
           status: 'OPEN',
+          payments: { none: {} },
           ...(options.declineIncoming ? { acceptance: 'PENDING' } : {}),
         },
         data: {
@@ -1099,6 +1282,7 @@ export class OrdersService {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      await this.assertOrderEditableInTx(tx, orderId);
       await tx.order.update({
         where: { id: orderId },
         data: {
@@ -1183,6 +1367,7 @@ export class OrdersService {
     if (dto.quantity === item.quantity) return this.getOrder(branchId, orderId);
 
     await this.prisma.$transaction(async (tx) => {
+      await this.assertOrderEditableInTx(tx, orderId);
       await this.assertLineNotStarted(tx, itemId);
       const unit = Number(item.lineTotal) / item.quantity;
       await tx.orderItem.update({
@@ -1230,6 +1415,7 @@ export class OrdersService {
     }
 
     await this.prisma.$transaction(async (tx) => {
+      await this.assertOrderEditableInTx(tx, orderId);
       await this.assertLineNotStarted(tx, itemId);
       await tx.orderItem.delete({ where: { id: itemId } });
       // A ticket left with nothing on it is cancelled, not left dangling.
@@ -1300,6 +1486,15 @@ export class OrdersService {
     }>,
     adj: BillPreviewDto,
     customerId: string | null,
+    /**
+     * Inside a checkout transaction the branch and coupon lookups must NOT open a second pool connection (the
+     * transaction already holds one; concurrent checkouts then deadlock on a full pool). The caller passes what it
+     * resolved before the transaction began.
+     */
+    preResolved?: {
+      branch: Prisma.BranchGetPayload<{ include: { restaurant: true } }>;
+      auto: Awaited<ReturnType<MarketingService['resolveCheckoutDiscount']>>;
+    },
   ) {
     const paid = round2(
       order.payments.reduce((sum, p) => sum + Number(p.amount), 0),
@@ -1345,10 +1540,12 @@ export class OrdersService {
       };
     }
 
-    const branch = await this.prisma.branch.findUniqueOrThrow({
-      where: { id: branchId },
-      include: { restaurant: true },
-    });
+    const branch =
+      preResolved?.branch ??
+      (await this.prisma.branch.findUniqueOrThrow({
+        where: { id: branchId },
+        include: { restaurant: true },
+      }));
     const lines = order.items.map((item) =>
       priceLine({
         quantity: item.quantity,
@@ -1359,33 +1556,52 @@ export class OrdersService {
     // Coupon / happy-hour discount, worked out on the bill's own subtotal and
     // added to any manual discount. A bad coupon code throws here, before
     // anything is charged.
-    const auto = await this.marketing.resolveCheckoutDiscount(
-      branchId,
-      round2(lines.reduce((sum, l) => sum + l.lineTotal, 0)),
-      adj.couponCode,
-    );
+    const auto =
+      preResolved?.auto ??
+      (await this.marketing.resolveCheckoutDiscount(
+        branchId,
+        round2(lines.reduce((sum, l) => sum + l.lineTotal, 0)),
+        adj.couponCode,
+      ));
     // Points a guest asked to use when ordering online apply here unless staff
     // choose otherwise; they are capped at the balance so an out-of-date
     // request can never block taking payment.
-    const pointsToRedeem =
+    const requestedPoints =
       adj.loyaltyPointsToRedeem ??
       Math.min(order.requestedRedeemPoints, order.customer?.loyaltyPoints ?? 0);
-    if (pointsToRedeem > 0 && !customerId) {
+    if (requestedPoints > 0 && !customerId) {
       throw new BadRequestException(
         'Cannot redeem loyalty points without a customer on the order',
       );
     }
+    const pointValue = Number(branch.restaurant.loyaltyPointValue);
+    const beforeLoyalty = computeBill({
+      lines,
+      discountPercent: adj.discountPercent,
+      discountFlat: adj.discountFlat,
+      autoDiscount: auto.amount,
+      loyaltyDiscountRequested: 0,
+      tip: adj.tipAmount,
+      deliveryFee: Number(order.deliveryFee),
+    });
+    // computeBill caps the *currency* discount, but the caller then debits the
+    // raw point count. Cap the points themselves to what the bill is worth so
+    // a ₹100 bill cannot burn 1,000 points for a ₹100 discount.
+    const pointsToRedeem = affordableLoyaltyPoints(
+      beforeLoyalty.totalDue,
+      pointValue,
+      requestedPoints,
+    );
     const bill = computeBill({
       lines,
       discountPercent: adj.discountPercent,
       discountFlat: adj.discountFlat,
       autoDiscount: auto.amount,
-      loyaltyDiscountRequested:
-        pointsToRedeem * Number(branch.restaurant.loyaltyPointValue),
+      loyaltyDiscountRequested: pointsToRedeem * pointValue,
       tip: adj.tipAmount,
       deliveryFee: Number(order.deliveryFee),
     });
-    return { bill, locked, paid, auto, pointsToRedeem };
+    return { bill, locked, paid, auto, pointsToRedeem, branch };
   }
 
   // The figures a bill would settle at right now - what the Print Bill button
@@ -1478,6 +1694,7 @@ export class OrdersService {
         discountPercent: view.discountPercent,
         taxAmount: view.taxAmount,
         tipAmount: view.tipAmount,
+        deliveryFee: view.deliveryFee,
         loyaltyPointsRedeemed: view.loyaltyPointsRedeemed,
         loyaltyDiscountAmount: view.loyaltyDiscountAmount,
         totalAmount: view.totalDue,
@@ -1488,13 +1705,18 @@ export class OrdersService {
     };
   }
 
-  async recordBillPrinted(branchId: string, orderId: string, userId: string) {
+  async recordBillPrinted(
+    branchId: string,
+    orderId: string,
+    userId: string,
+    channel: 'PRINT' | 'QR_SHARE' = 'PRINT',
+  ) {
     await this.audit.record({
       userId,
       action: 'order.bill_printed',
       entity: 'Order',
       entityId: orderId,
-      metadata: { branchId },
+      metadata: { branchId, channel },
     });
   }
 
@@ -1548,13 +1770,18 @@ export class OrdersService {
       effectiveCustomerId = customer.id;
     }
 
-    const { bill, locked, paid, auto, pointsToRedeem } = await this.resolveBill(
+    const firstBill = await this.resolveBill(
       branchId,
       order,
       dto,
       effectiveCustomerId,
     );
-    const balance = round2(bill.totalDue - paid);
+    let { bill, locked, paid, auto, pointsToRedeem } = firstBill;
+    const preSubtotal = round2(
+      order.items.reduce((sum, i) => sum + Number(i.lineTotal), 0),
+    );
+    let balance = round2(bill.totalDue - paid);
+    let paidAlready = paid;
     const entry = manualDiscountEntry(
       dto.discountPercent ?? 0,
       dto.discountFlat ?? 0,
@@ -1575,8 +1802,72 @@ export class OrdersService {
     let stockSkipped: { menuItemId: string; name: string; reason: string }[] =
       [];
     let settlement!: ReturnType<typeof settlePayments>;
+    let replayedInTx = false;
     try {
       await this.prisma.$transaction(async (tx) => {
+        // Serialize checkouts for this bill. A partial payment deliberately
+        // leaves the order OPEN, so `status:'OPEN'` alone is not a concurrency
+        // guard: without the row lock two tills can both validate against the
+        // same stale `paid` amount and overpay the bill.
+        await tx.order.update({
+          where: { id: orderId },
+          data: { updatedAt: new Date() },
+        });
+        // Re-read the whole bill after the lock: the earlier read can observe a
+        // different committed state than the payments (READ COMMITTED), and a
+        // concurrent discount change must not leave a stale total in `bill`.
+        const freshOrder = await tx.order.findFirst({
+          where: { id: orderId, branchId },
+          include: { items: true, payments: true, customer: true },
+        });
+        if (!freshOrder) throw new NotFoundException('Order not found');
+        // The coupon and branch lookups were done before the transaction (see resolveBill). They depend on the
+        // bill's subtotal, so if items were added or removed in between, ask the cashier to retry.
+        if (
+          round2(
+            freshOrder.items.reduce((sum, i) => sum + Number(i.lineTotal), 0),
+          ) !== preSubtotal
+        ) {
+          throw new ConflictException(
+            'The bill changed while you were checking out. Refresh and retry.',
+          );
+        }
+        ({ bill, locked, paid, auto, pointsToRedeem } = await this.resolveBill(
+          branchId,
+          freshOrder,
+          dto,
+          effectiveCustomerId,
+          firstBill.branch
+            ? {
+                branch: firstBill.branch,
+                auto: firstBill.auto,
+              }
+            : undefined,
+        ));
+        balance = round2(bill.totalDue - paid);
+        const freshPayments = freshOrder.payments as Array<{
+          amount: Prisma.Decimal;
+          clientRequestId: string | null;
+        }>;
+        // The first read happened before the row lock. A concurrent copy of
+        // the SAME request may have committed in between; that is a replay,
+        // not a conflict, and must return its normal replay result.
+        if (
+          dto.requestId &&
+          freshPayments.some((p) => p.clientRequestId === dto.requestId)
+        ) {
+          replayedInTx = true;
+          return;
+        }
+        if (!locked && freshPayments.length > 0) {
+          throw new ConflictException(
+            'The bill was paid by another request while you were checking out. Refresh and retry.',
+          );
+        }
+        paidAlready = round2(
+          freshPayments.reduce((sum, p) => sum + Number(p.amount), 0),
+        );
+        balance = round2(bill.totalDue - paidAlready);
         let actualPointsRedeemed = order.loyaltyPointsRedeemed;
         let loyaltyDiscountAmount = Number(order.loyaltyDiscountAmount);
 
@@ -1655,6 +1946,23 @@ export class OrdersService {
           giftCardApplied,
           allowPartial: dto.allowPartial,
         });
+
+        // Store credit is tender just like a gift card: debit the wallet for
+        // the amount actually applied (after cash over-tender is normalised)
+        // inside this same transaction. Without this the order went PAID with
+        // a STORE_CREDIT row while the customer kept their money.
+        const storeCreditAmount = round2(
+          settlement.payments
+            .filter((p) => p.method === 'STORE_CREDIT')
+            .reduce((sum, p) => sum + p.amount, 0),
+        );
+        if (storeCreditAmount > 0) {
+          await this.debitStoreCredit(tx, {
+            branchId,
+            customerId: freshOrder.customerId ?? effectiveCustomerId,
+            amount: storeCreditAmount,
+          });
+        }
 
         const paymentRows = settlement.payments.map((p, i) => ({
           method: p.method as never,
@@ -1794,6 +2102,7 @@ export class OrdersService {
       }
       throw err;
     }
+    if (replayedInTx) return this.checkoutResult(branchId, orderId);
 
     const updated = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
@@ -1862,7 +2171,7 @@ export class OrdersService {
       ...updated,
       settlement: {
         amountDue: bill.totalDue,
-        amountPaid: round2(paid + settlement.paidNow),
+        amountPaid: round2(paidAlready + settlement.paidNow),
         balanceDue: settlement.balanceAfter,
         changeDue: settlement.changeDue,
         fullyPaid: settlement.fullyPaid,
@@ -1900,18 +2209,320 @@ export class OrdersService {
     };
   }
 
+  /**
+   * Points earned and redeemed on an order follow the money. A full refund
+   * returns every point; a partial refund returns the proportion that was
+   * refunded. Reversals are prorated against the *cumulative* refunded amount
+   * in integer cents, so several partial refunds cannot each round up to more
+   * than the original earn. Each ledger row is keyed by refund id so a replay
+   * is a no-op, and an uncollectable reversal is recorded as pending instead of
+   * failing the monetary refund (the points may already have been spent).
+   */
+  private async reverseRefundPoints(
+    tx: Prisma.TransactionClient,
+    a: {
+      branchId: string;
+      orderId: string;
+      customerId: string | null;
+      refundId: string;
+      refundAmount: number;
+      totalAmount: number;
+      /** Portion of the bill paid with money (total minus loyalty tender). */
+      moneyPaid: number;
+      alreadyRefunded: number;
+      pointsRedeemed: number;
+    },
+  ) {
+    const [earn, redeem, prior] = await Promise.all([
+      tx.pointsLedger.findUnique({
+        where: { idempotencyKey: `earn:${a.orderId}` },
+      }),
+      tx.pointsLedger.findUnique({
+        where: { idempotencyKey: `redeem:${a.orderId}` },
+      }),
+      tx.pointsLedger.findMany({
+        where: {
+          orderId: a.orderId,
+          reason: {
+            in: [
+              'REFUND_EARN_REVERSAL',
+              'REFUND_EARN_REVERSAL_PENDING',
+              'REFUND_REDEEM_RESTORATION',
+            ],
+          },
+        },
+        select: { reason: true, delta: true },
+      }),
+    ]);
+    const earned = Math.max(earn?.delta ?? 0, 0);
+    const redeemed = Math.max(a.pointsRedeemed, -(redeem?.delta ?? 0));
+    if (!earned && !redeemed) return;
+    // A detached ledger entry still belongs to the deleted customer. Only
+    // legacy redemptions without a ledger entry use the order's customer.
+    const earnCustomer = earn?.customerId ?? null;
+    const redeemCustomer = redeem ? redeem.customerId : a.customerId;
+    if (!earnCustomer && !redeemCustomer) return;
+
+    const priorReversedEarn = prior
+      .filter((r) =>
+        ['REFUND_EARN_REVERSAL', 'REFUND_EARN_REVERSAL_PENDING'].includes(
+          r.reason,
+        ),
+      )
+      .reduce((n, r) => n - r.delta, 0);
+    const priorRestoredRedeem = prior
+      .filter((r) => r.reason === 'REFUND_REDEEM_RESTORATION')
+      .reduce((n, r) => n + r.delta, 0);
+    const totalCents = Math.round(a.totalAmount * 100);
+    const refundedCents = Math.round(
+      (a.alreadyRefunded + a.refundAmount) * 100,
+    );
+    const share = totalCents <= 0 ? 1 : Math.min(1, refundedCents / totalCents);
+    // Redeemed points are returned in proportion to the money actually
+    // refunded, relative to the money originally paid. Using totalAmount here
+    // would leave some points unreturned after the money portion is fully
+    // refunded (e.g. 60 money + 40 points on a 100 bill).
+    const moneyCents = Math.round(Math.max(0, a.moneyPaid) * 100);
+    const redeemShare =
+      moneyCents <= 0 ? 0 : Math.min(1, refundedCents / moneyCents);
+    const reverseEarn = Math.max(
+      0,
+      Math.floor(earned * share) - priorReversedEarn,
+    );
+    const restoreRedeem = Math.max(
+      0,
+      Math.floor(redeemed * redeemShare) - priorRestoredRedeem,
+    );
+    if (!reverseEarn && !restoreRedeem) return;
+
+    const balances = new Map<string, number>();
+    const balanceFor = async (id: string) => {
+      if (!balances.has(id)) {
+        const c = await tx.customer.findUnique({
+          where: { id },
+          select: { loyaltyPoints: true },
+        });
+        balances.set(id, c ? Number(c.loyaltyPoints) : NaN);
+      }
+      return balances.get(id) as number;
+    };
+    const credit = async (id: string | null, amount: number) => {
+      if (!id || amount <= 0) return;
+      const bal = await balanceFor(id);
+      if (Number.isNaN(bal)) return;
+      await tx.customer.update({
+        where: { id },
+        data: { loyaltyPoints: { increment: amount } },
+      });
+      balances.set(id, bal + amount);
+    };
+    const debit = async (id: string | null, amount: number) => {
+      if (!id || amount <= 0) return 0;
+      const bal = await balanceFor(id);
+      if (Number.isNaN(bal)) return 0;
+      const taken = Math.min(amount, Math.max(0, bal));
+      if (taken > 0) {
+        await tx.customer.update({
+          where: { id },
+          data: { loyaltyPoints: { decrement: taken } },
+        });
+        balances.set(id, bal - taken);
+      }
+      return taken;
+    };
+
+    // Credit restored points first: if the same customer earned and redeemed
+    // on this order, the restoration can cover the earn reversal.
+    await credit(redeemCustomer, restoreRedeem);
+    const collected = await debit(earnCustomer, reverseEarn);
+    const shortfall = reverseEarn - collected;
+
+    const rows: Prisma.PointsLedgerCreateManyInput[] = [];
+    if (earnCustomer && collected > 0) {
+      rows.push({
+        branchId: a.branchId,
+        customerId: earnCustomer,
+        delta: -collected,
+        reason: 'REFUND_EARN_REVERSAL',
+        orderId: a.orderId,
+        idempotencyKey: `refund:${a.refundId}:earn`,
+      });
+    }
+    if (earnCustomer && shortfall > 0) {
+      // Records the debt without touching the balance or blocking the refund.
+      rows.push({
+        branchId: a.branchId,
+        customerId: earnCustomer,
+        delta: -shortfall,
+        reason: 'REFUND_EARN_REVERSAL_PENDING',
+        orderId: a.orderId,
+        idempotencyKey: `refund:${a.refundId}:earn-pending`,
+      });
+    }
+    if (redeemCustomer && restoreRedeem > 0) {
+      rows.push({
+        branchId: a.branchId,
+        customerId: redeemCustomer,
+        delta: restoreRedeem,
+        reason: 'REFUND_REDEEM_RESTORATION',
+        orderId: a.orderId,
+        idempotencyKey: `refund:${a.refundId}:redeem`,
+      });
+    }
+    if (rows.length) {
+      await tx.pointsLedger.createMany({ data: rows, skipDuplicates: true });
+    }
+  }
+
+  /**
+   * Store credit is real tender: accepting it must take the money out of the
+   * customer's wallet in the same transaction that records the payment. A
+   * guarded updateMany closes the same race as loyalty/gift-card redemption —
+   * two concurrent checkouts must not both spend the same balance.
+   */
+  private async debitStoreCredit(
+    tx: Prisma.TransactionClient,
+    args: { branchId: string; customerId: string | null; amount: number },
+  ): Promise<void> {
+    const amount = round2(args.amount);
+    if (amount <= 0) return;
+    if (!args.customerId) {
+      throw new BadRequestException(
+        'Store credit requires a customer on the bill',
+      );
+    }
+    const customer = await tx.customer.findFirst({
+      where: { id: args.customerId, branchId: args.branchId },
+      select: { walletBalance: true },
+    });
+    if (!customer) {
+      throw new BadRequestException('Customer not found for this branch');
+    }
+    const available = Number(customer.walletBalance);
+    if (available < amount) {
+      throw new BadRequestException(
+        `Customer only has ${available} in store credit`,
+      );
+    }
+    const result = await tx.customer.updateMany({
+      where: {
+        id: args.customerId,
+        branchId: args.branchId,
+        walletBalance: { gte: amount },
+      },
+      data: { walletBalance: { decrement: amount } },
+    });
+    if (result.count === 0) {
+      throw new BadRequestException(
+        'Store-credit balance changed — please retry checkout',
+      );
+    }
+  }
+
+  /**
+   * A refund issued back to a gift card must credit EXACTLY the amount the
+   * refund record says, so the books and the card balance never disagree.
+   *
+   * Policy:
+   *  - Only value the customer actually paid with a gift card can go back to a
+   *    gift card. The ceiling is (total redeemed on the order) minus (earlier
+   *    GIFT_CARD refunds on the order). A bigger request is refused with a
+   *    message telling the cashier to refund the rest by cash or store credit.
+   *  - An order with no gift-card payment cannot be refunded to a gift card.
+   *  - With several redemptions (several cards, or several visits), value is
+   *    returned in redemption order: cumulative refunds fill the first
+   *    redemption, then the next. The credit for this refund is the difference
+   *    between the cumulative allocation after and before it, in whole cents,
+   *    so the credits always sum to the refund and repeated partial refunds
+   *    can never drift by a rounding cent.
+   *  - Mixed tender is handled by the same ceiling: a Rs100 bill paid Rs60 by
+   *    card and Rs40 cash can send at most Rs60 back to the card. The rest goes
+   *    back through the cash channel.
+   */
+  private async creditGiftCardsForRefund(
+    tx: Prisma.TransactionClient,
+    args: {
+      branchId: string;
+      orderId: string;
+      refundAmount: number;
+      priorGiftCardRefunded: number;
+    },
+  ): Promise<void> {
+    const redemptions = await tx.giftCardRedemption.findMany({
+      where: { orderId: args.orderId },
+      select: { giftCardId: true, amount: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    const cents = (n: number) => Math.round(n * 100);
+    const redeemed = redemptions.map((r) => cents(Number(r.amount)));
+    const totalRedeemed = redeemed.reduce((a, b) => a + b, 0);
+    if (totalRedeemed === 0) {
+      throw new BadRequestException(
+        'This order was not paid with a gift card, so it cannot be refunded to one. Refund it by cash or store credit instead.',
+      );
+    }
+    const prior = cents(args.priorGiftCardRefunded);
+    const now = cents(args.refundAmount);
+    if (prior + now > totalRedeemed) {
+      const room = Math.max(0, totalRedeemed - prior) / 100;
+      throw new BadRequestException(
+        `Only ${room.toFixed(2)} can still go back to a gift card on this order (that is what was paid with one). Refund the rest by cash or store credit.`,
+      );
+    }
+    // Cumulative fill: how much of redemption i is covered once `upTo` cents
+    // have been refunded to cards.
+    const fill = (upTo: number) => {
+      let left = upTo;
+      return redeemed.map((r) => {
+        const used = Math.min(r, left);
+        left -= used;
+        return used;
+      });
+    };
+    const before = fill(prior);
+    const after = fill(prior + now);
+    // One card may hold several redemptions: merge before crediting.
+    const perCard = new Map<string, number>();
+    redemptions.forEach((r, i) => {
+      const delta = after[i] - before[i];
+      if (delta > 0)
+        perCard.set(r.giftCardId, (perCard.get(r.giftCardId) ?? 0) + delta);
+    });
+    for (const [giftCardId, c] of perCard) {
+      await this.giftCards.credit(tx, args.branchId, giftCardId, c / 100);
+    }
+  }
+
   async refund(
     branchId: string,
     orderId: string,
     userId: string,
     dto: RefundDto,
+    /** A phone's event id: stored on the refund, so the same refund sent twice is refused by the unique index. */
+    clientRequestId?: string,
+    /** Gateway reservation being finalized: excluded from the hold total and linked atomically below. */
+    excludeReservationId?: string,
   ) {
+    // The REST route validates this with a schema, but other callers (the MCP tools) reach this method directly:
+    // a zero or negative "refund" would be stored as a ledger entry and raise what can still be refunded.
+    if (!Number.isFinite(dto.amount) || dto.amount <= 0) {
+      throw new BadRequestException('A refund must be more than zero');
+    }
     const order = await this.prisma.order.findFirst({
       where: { id: orderId, branchId },
     });
     if (!order) throw new NotFoundException('Order not found');
     if (order.status !== 'PAID') {
       throw new BadRequestException('Only a paid order can be refunded');
+    }
+    // There is no wallet to credit on a walk-in bill. Refusing here is
+    // essential: otherwise the Refund row is created, the refundable balance
+    // drops to zero, and the guest receives nothing but can never be paid by
+    // another method.
+    if (dto.method === 'STORE_CREDIT' && !order.customerId) {
+      throw new BadRequestException(
+        'This bill has no customer wallet to refund store credit to. Refund it by cash instead.',
+      );
     }
 
     const refund = await this.prisma.$transaction(async (tx) => {
@@ -1931,10 +2542,38 @@ export class OrdersService {
       const alreadyRefunded = round2(
         refunds.reduce((sum, r) => sum + Number(r.amount), 0),
       );
-      const refundable = round2(Number(order.totalAmount) - alreadyRefunded);
+      // A gateway refund reserves its amount before the provider is called.
+      // Standalone cash/store-credit refunds must respect that hold too, or
+      // both channels can pay out while the provider call is still in flight.
+      // Rows already linked to a local Refund are recorded in `refunds` above,
+      // so only unlinked reservations are counted here.
+      const reservations = await tx.gatewayRefund.findMany({
+        where: {
+          orderId,
+          refundId: null,
+          status: { in: ['PENDING', 'SUCCEEDED', 'NEEDS_REVIEW'] },
+          ...(excludeReservationId
+            ? { id: { not: excludeReservationId } }
+            : {}),
+        },
+        select: { amountMinor: true, currency: true },
+      });
+      const held = round2(
+        reservations.reduce(
+          (sum, r) => sum + fromMinor(r.amountMinor, r.currency),
+          0,
+        ),
+      );
+      // Loyalty points are tender, not a price reduction: that part of the
+      // bill was never paid in money and is restored as points below. Capping
+      // money refunds to the cash/card/UPI portion prevents paying it twice.
+      const moneyPaid = round2(
+        Number(order.totalAmount) - Number(order.loyaltyDiscountAmount),
+      );
+      const refundable = round2(moneyPaid - alreadyRefunded - held);
       if (dto.amount > refundable) {
         throw new BadRequestException(
-          `Cannot refund ${dto.amount} — only ${refundable} remains refundable on this order`,
+          `Cannot refund ${dto.amount} — only ${refundable} can be refunded in money on this order (loyalty points are returned as points)`,
         );
       }
 
@@ -1945,9 +2584,46 @@ export class OrdersService {
           reason: dto.reason,
           method: dto.method,
           createdById: userId,
+          ...(clientRequestId ? { clientRequestId } : {}),
         },
       });
+      if (excludeReservationId) {
+        // Consume the gateway hold in this same transaction. If the link write
+        // later failed outside it, the hold would be counted twice (local
+        // Refund + still-unlinked gateway row) and block future refunds.
+        await tx.gatewayRefund.update({
+          where: { id: excludeReservationId },
+          data: { refundId: created.id },
+        });
+      }
+      // Only a refund *back to the card* restores its balance. A cash or
+      // store-credit refund pays the customer through that other channel;
+      // crediting the card as well would pay them twice.
+      if (dto.method === 'GIFT_CARD') {
+        const priorGiftCardRefunded = round2(
+          refunds
+            .filter((r) => r.method === 'GIFT_CARD')
+            .reduce((sum, r) => sum + Number(r.amount), 0),
+        );
+        await this.creditGiftCardsForRefund(tx, {
+          branchId,
+          orderId,
+          refundAmount: dto.amount,
+          priorGiftCardRefunded,
+        });
+      }
       await this.verifactu.recordRefund(tx, orderId, created.id, dto.amount);
+      await this.reverseRefundPoints(tx, {
+        branchId,
+        orderId,
+        customerId: order.customerId,
+        refundId: created.id,
+        refundAmount: dto.amount,
+        totalAmount: Number(order.totalAmount),
+        moneyPaid,
+        alreadyRefunded,
+        pointsRedeemed: order.loyaltyPointsRedeemed,
+      });
 
       // Money-only refunds never touch stock. Stock comes back only for the
       // units the staff member says were physically returned, capped at what
@@ -2000,10 +2676,15 @@ export class OrdersService {
         // STORE_CREDIT refunds for the same customer (from different
         // orders) could otherwise both read the same stale walletBalance
         // and one credit would be silently lost.
-        await tx.customer.update({
-          where: { id: order.customerId },
+        const credited = await tx.customer.updateMany({
+          where: { id: order.customerId, branchId },
           data: { walletBalance: { increment: dto.amount } },
         });
+        if (credited.count === 0) {
+          throw new BadRequestException(
+            'Customer no longer exists — cannot credit store credit',
+          );
+        }
       }
 
       return created;
@@ -2053,6 +2734,11 @@ export class OrdersService {
     this.assertNoPayments(source);
 
     const updated = await this.prisma.$transaction(async (tx) => {
+      // Both orders are locked; always acquire in id order so two concurrent
+      // merges in opposite directions cannot deadlock.
+      for (const id of [targetOrderId, sourceOrderId].sort()) {
+        await this.assertOrderEditableInTx(tx, id);
+      }
       await tx.orderItem.updateMany({
         where: { orderId: sourceOrderId },
         data: { orderId: targetOrderId },
@@ -2108,6 +2794,163 @@ export class OrdersService {
       id: sourceOrderId,
     });
     return this.getOrder(branchId, updated.id);
+  }
+
+  /**
+   * Split one open bill into a second open bill holding some of its lines, so each guest pays their own
+   * (each is then checked out as usual, with any payment methods). Whole lines move, or part of a line's quantity:
+   * the moved share of the line total is rounded to cents and the remainder keeps the exact complement, so the
+   * two bills always add up to the original. Nothing may be paid on the bill yet, and at least one line stays.
+   * A retried requestId returns the bill the first call created.
+   */
+  async splitOrder(
+    branchId: string,
+    orderId: string,
+    userId: string,
+    dto: SplitOrderDto,
+  ) {
+    const replay = await this.prisma.order.findFirst({
+      where: { branchId, clientRequestId: `split:${dto.requestId}` },
+      select: { id: true },
+    });
+    if (replay) return this.getOrder(branchId, replay.id);
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      // Two splits of one bill must see each other's result.
+      await tx.$queryRaw`SELECT id FROM orders WHERE id = ${orderId} AND "branchId" = ${branchId} FOR UPDATE`;
+      // A copy of this same request that was waiting on the lock must not split a second time.
+      const done = await tx.order.findFirst({
+        where: { branchId, clientRequestId: `split:${dto.requestId}` },
+      });
+      if (done) return done;
+      const order = await tx.order.findFirst({
+        where: { id: orderId, branchId },
+        include: {
+          items: { include: { modifiers: true } },
+          payments: { select: { id: true } },
+        },
+      });
+      if (!order) throw new NotFoundException('Order not found');
+      if (order.status !== 'OPEN')
+        throw new BadRequestException('Only an open bill can be split');
+      if (order.type === 'DELIVERY' || order.channel === 'ONLINE')
+        throw new BadRequestException(
+          'Delivery and online orders cannot be split',
+        );
+      this.assertNoPayments(order);
+
+      const live = order.items.filter((i) => i.status !== 'CANCELLED');
+      const byId = new Map(live.map((i) => [i.id, i]));
+      const want = new Map<string, number>();
+      for (const l of dto.lines)
+        want.set(l.orderItemId, (want.get(l.orderItemId) ?? 0) + l.quantity);
+      for (const [id, q] of want) {
+        const item = byId.get(id);
+        if (!item) throw new BadRequestException('A line is not on this bill');
+        if (q > item.quantity)
+          throw new BadRequestException(
+            `Only ${item.quantity} of ${item.nameSnapshot} on this bill`,
+          );
+      }
+      const staying = live.reduce(
+        (n, i) => n + (i.quantity - (want.get(i.id) ?? 0)),
+        0,
+      );
+      if (staying === 0)
+        throw new BadRequestException(
+          'Leave at least one item on the original bill',
+        );
+
+      const orderNumber = await this.nextOrderNumber(branchId, tx);
+      const child = await tx.order.create({
+        data: {
+          branchId,
+          orderNumber,
+          type: order.type,
+          channel: order.channel,
+          acceptance: order.acceptance,
+          tableId: order.tableId,
+          guestCount: order.guestCount,
+          customerId: order.customerId,
+          guestName: order.guestName,
+          notes: `Split from ${order.orderNumber}`,
+          clientRequestId: `split:${dto.requestId}`,
+          createdById: userId,
+          subtotal: 0,
+          taxAmount: 0,
+          discountAmount: 0,
+          totalAmount: 0,
+        },
+      });
+
+      for (const [id, q] of want) {
+        const item = byId.get(id)!;
+        if (q === item.quantity) {
+          await tx.orderItem.update({
+            where: { id },
+            data: { orderId: child.id },
+          });
+          continue;
+        }
+        // Part of the line: the moved share is rounded to cents, the original keeps the exact remainder.
+        const total = new Prisma.Decimal(item.lineTotal);
+        const moved = total.mul(q).div(item.quantity).toDecimalPlaces(2);
+        await tx.orderItem.update({
+          where: { id },
+          data: { quantity: item.quantity - q, lineTotal: total.minus(moved) },
+        });
+        await tx.orderItem.create({
+          data: {
+            orderId: child.id,
+            menuItemId: item.menuItemId,
+            nameSnapshot: item.nameSnapshot,
+            unitPriceSnapshot: item.unitPriceSnapshot,
+            taxRateSnapshot: item.taxRateSnapshot,
+            quantity: q,
+            lineTotal: moved,
+            kitchenNote: item.kitchenNote,
+            status: item.status,
+            portion: item.portion,
+            portionRatio: item.portionRatio,
+            modifiers: {
+              create: item.modifiers.map((m) => ({
+                modifierId: m.modifierId,
+                nameSnapshot: m.nameSnapshot,
+                priceAdjSnapshot: m.priceAdjSnapshot,
+              })),
+            },
+          },
+        });
+      }
+
+      for (const id of [orderId, child.id]) {
+        const rows = await tx.orderItem.findMany({
+          where: { orderId: id, status: { not: 'CANCELLED' } },
+        });
+        const totals = computeOrderTotals(
+          rows.map((r) =>
+            priceLine({
+              quantity: r.quantity,
+              unitPriceInclusive: Number(r.lineTotal) / r.quantity,
+              taxRatePercent: Number(r.taxRateSnapshot),
+            }),
+          ),
+        );
+        await tx.order.update({
+          where: { id },
+          data: {
+            subtotal: totals.subtotal,
+            taxAmount: totals.taxAmount,
+            totalAmount: totals.subtotal,
+          },
+        });
+      }
+      return child;
+    });
+
+    this.realtime.emitToBranch(branchId, 'order.updated', { id: orderId });
+    this.realtime.emitToBranch(branchId, 'order.updated', { id: created.id });
+    return this.getOrder(branchId, created.id);
   }
 
   private buildLine(
@@ -2182,7 +3025,12 @@ export class OrdersService {
       menuItem: {
         id: menuItem.id,
         name: menuItem.name + portionSuffix,
-        price: unitPriceInclusive - round2(modifierTotal),
+        // This becomes OrderItem.unitPriceSnapshot. It must be the full
+        // inclusive per-unit price (base + modifiers, grossed up for
+        // EXCLUSIVE tax), otherwise the receipt shows a rate that cannot be
+        // multiplied by the quantity to reach its own line total. Modifier
+        // names are printed under the item, so they are not double-counted.
+        price: unitPriceInclusive,
         taxRatePercent,
       },
       selectedModifiers,
@@ -2194,9 +3042,14 @@ export class OrdersService {
   // count collides with an existing number as soon as any earlier order of the
   // day has been deleted (orders.delete), and that surfaced as a 409 on the
   // unique (branchId, orderNumber) index.
-  private async nextOrderNumber(branchId: string): Promise<string> {
+  private async nextOrderNumber(
+    branchId: string,
+    tx: Prisma.TransactionClient,
+  ): Promise<string> {
     const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const latest = await this.prisma.order.findFirst({
+    // Held until the transaction ends, so the next order sees this one's number. (executeRaw: the function returns void.)
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'order-number:' + branchId + ':' + datePart}))`;
+    const latest = await tx.order.findFirst({
       where: { branchId, orderNumber: { startsWith: `${datePart}-` } },
       orderBy: { orderNumber: 'desc' },
       select: { orderNumber: true },
@@ -2225,7 +3078,11 @@ export class OrdersService {
         modifierGroup: { branchId },
       },
       include: {
-        modifierGroup: { include: { modifiers: { select: { id: true } } } },
+        modifierGroup: {
+          include: {
+            modifiers: { where: { isActive: true }, select: { id: true } },
+          },
+        },
       },
     });
     for (const item of items) {
@@ -2538,6 +3395,7 @@ export class OrdersService {
     }));
 
     await this.prisma.$transaction(async (tx) => {
+      await this.assertOrderEditableInTx(tx, order.id);
       const moved = await tx.kot.updateMany({
         where: { id: kotId, status: kot.status },
         data: {

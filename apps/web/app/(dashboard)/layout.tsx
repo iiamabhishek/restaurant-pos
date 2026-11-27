@@ -10,6 +10,10 @@ import { NativeBridge } from "@/components/native/native-bridge";
 import { BtPrinterDialog } from "@/components/native/bt-printer-dialog";
 import { NAV_ITEMS } from "@/components/layout/nav-items";
 import { canOpen, firstAllowedHref } from "@/lib/route-access";
+import { setUnauthorizedHandler } from "@/lib/api";
+import { StaffLocaleProvider } from "@/lib/i18n/staff-provider";
+import { useI18n } from "@/lib/i18n/context";
+import { useQueryClient } from "@tanstack/react-query";
 
 // Subscribes every route in this layout group to realtime push (order/KOT/
 // table updates) instead of only the one page (KDS) that happened to call
@@ -26,8 +30,14 @@ function RealtimeBridge() {
 }
 
 export default function DashboardGroupLayout({ children }: { children: React.ReactNode }) {
+  return <StaffLocaleProvider><StaffDashboard>{children}</StaffDashboard></StaffLocaleProvider>;
+}
+
+function StaffDashboard({ children }: { children: React.ReactNode }) {
+  const { t } = useI18n();
   const router = useRouter();
   const pathname = usePathname();
+  const queryClient = useQueryClient();
   const { data, isLoading, isError } = useCurrentUser();
   const permissions = data?.user.permissions;
   const allowed = !permissions || canOpen(pathname ?? "", permissions, NAV_ITEMS);
@@ -38,6 +48,16 @@ export default function DashboardGroupLayout({ children }: { children: React.Rea
       router.replace("/login");
     }
   }, [isLoading, isError, router]);
+
+  // Any authenticated query getting 401 means the session ended. Clear the
+  // cached identity too, or the shell would keep claiming we are signed in.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      queryClient.removeQueries();
+      router.replace("/login");
+    });
+    return () => setUnauthorizedHandler(null);
+  }, [queryClient, router]);
 
   // Direct URL to a page the role may not use (e.g. a waiter opening /dashboard
   // after login): send them to their first permitted screen.
@@ -56,7 +76,7 @@ export default function DashboardGroupLayout({ children }: { children: React.Rea
   if (!allowed) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background p-6 text-center text-sm text-muted-foreground">
-        {fallback ? "Redirecting…" : "Your role has no access to this page. Ask an administrator."}
+        {fallback ? t("Redirecting…") : t("Your role has no access to this page. Ask an administrator.")}
       </div>
     );
   }
@@ -64,7 +84,7 @@ export default function DashboardGroupLayout({ children }: { children: React.Rea
   return (
     <BranchProvider>
       <RealtimeBridge />
-      <NativeBridge />
+      <NativeBridge userId={data.user.id} />
       <BtPrinterDialog />
       <AppShell user={data.user}>{children}</AppShell>
     </BranchProvider>

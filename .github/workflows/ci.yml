@@ -1,0 +1,90 @@
+name: CI
+
+# Typecheck, unit tests, the full e2e suite against a real Postgres, mobile offline-layer tests and a
+# dependency audit on every push and pull request. The e2e suites are opt-in by environment flag (so a
+# plain `jest` run needs no database); this job turns every flag on so none of them is silently skipped.
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_PASSWORD: ci, POSTGRES_DB: orr }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:ci@localhost:5432/orr
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+        env:
+          # The backend step generates the client from its workspace schema below.
+          PRISMA_SKIP_POSTINSTALL_GENERATE: '1'
+      - name: Dependency audit (production)
+        run: pnpm audit --prod --audit-level moderate
+      - name: Build shared types
+        run: pnpm --filter ./packages/types build
+      - name: Prisma client + migrations + seed
+        working-directory: apps/backend
+        run: |
+          pnpm exec prisma generate
+          pnpm exec prisma migrate deploy
+          pnpm exec prisma db seed
+      - name: Typecheck
+        run: pnpm -r --if-present typecheck
+      - name: Lint (never autofixes; run eslint --fix locally and review the diff)
+        run: |
+          (cd apps/backend && pnpm exec eslint src test)
+          (cd apps/web && pnpm exec eslint .)
+      - name: Backend unit tests
+        working-directory: apps/backend
+        run: pnpm exec jest
+      - name: Backend e2e tests (every opt-in flag on)
+        working-directory: apps/backend
+        run: |
+          for f in $(grep -rhoE 'process\.env\.[A-Z0-9_]+_E2E' test src | sed 's/process.env.//' | sort -u); do export "$f=1"; done
+          export JWT_SECRET="$(openssl rand -hex 32)"
+          pnpm exec jest --config ./test/jest-e2e.json --runInBand --testTimeout=60000
+      - name: Backend build + runtime dependency check
+        run: |
+          pnpm --filter backend build
+          node apps/backend/scripts/check-runtime-deps.cjs
+      - name: Web unit tests
+        run: pnpm --filter ./apps/web test
+      - name: Web build
+        run: pnpm --filter ./apps/web build
+
+  mobile-offline-layer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+      - run: node --test mobile/www/pos/lib/*.test.mjs updater/*.test.mjs
+      # Real-IndexedDB regressions (numbering counters, retry-safe stock, backups) run in the runner's Chrome.
+      - name: Real IndexedDB tests (headless Chrome)
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw" && npm init -y >/dev/null && npm i --no-audit --no-fund playwright-core@1.49.1 >/dev/null
+          cd "$GITHUB_WORKSPACE"
+          export NODE_PATH="$RUNNER_TEMP/pw/node_modules" CHROME="$(command -v google-chrome || command -v chromium-browser || command -v chromium)"
+          node mobile/test/idb-counters.chrome.cjs
+          node mobile/test/stock-and-backup.chrome.cjs
+          node mobile/test/menu-pause.chrome.cjs

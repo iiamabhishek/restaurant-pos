@@ -1,18 +1,25 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import type {
+import {
+  SessionUser,
   CreateStaffDto,
   DepartmentDto,
   SetPermissionOverridesDto,
   UpdateStaffDto,
 } from '@nodedr-restaurant/types';
+import { permissionSatisfied } from '@nodedr-restaurant/types';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { AuditService } from '../../audit/audit.service';
+import {
+  assertMayManageRole,
+  userCeilingSubject,
+} from '../../common/privilege-ceiling';
 import { PrismaService } from '../../prisma/prisma.service';
 
 const SELECT = {
@@ -59,8 +66,17 @@ export class UsersService {
     });
   }
 
-  async create(restaurantId: string, actorId: string, dto: CreateStaffDto) {
+  async create(
+    restaurantId: string,
+    actorId: string,
+    dto: CreateStaffDto,
+    actor: SessionUser,
+  ) {
     await this.assertRoleInRestaurant(restaurantId, dto.roleId);
+    assertMayManageRole(
+      actor,
+      await this.roleWithKeys(restaurantId, dto.roleId),
+    );
     await this.assertBranchesInRestaurant(restaurantId, dto.branchIds);
     await this.assertDepartmentInRestaurant(restaurantId, dto.departmentId);
 
@@ -108,13 +124,27 @@ export class UsersService {
     actorId: string,
     id: string,
     dto: UpdateStaffDto,
+    actor: SessionUser,
   ) {
     const existing = await this.prisma.user.findFirst({
       where: { id, restaurantId },
-      include: { role: true },
+      include: {
+        role: { include: { permissions: { include: { permission: true } } } },
+        permissionOverrides: { include: { permission: true } },
+      },
     });
     if (!existing) {
       throw new NotFoundException('Staff account not found');
+    }
+    // Only someone with at least the target's access (role plus any direct grants) may change their password, email, role or status.
+    assertMayManageRole(actor, userCeilingSubject(existing));
+    if (dto.roleId && dto.roleId !== existing.roleId) {
+      if (id === actor.id)
+        throw new ForbiddenException('You cannot change your own role.');
+      assertMayManageRole(
+        actor,
+        await this.roleWithKeys(restaurantId, dto.roleId),
+      );
     }
 
     if (
@@ -158,6 +188,8 @@ export class UsersService {
         departmentId: dto.departmentId,
         isActive: dto.isActive,
         passwordHash,
+        // A new password ends every session signed in with the old one.
+        ...(passwordHash ? { sessionsValidFrom: new Date() } : {}),
         ...(dto.branchIds
           ? {
               branches: {
@@ -193,18 +225,27 @@ export class UsersService {
     return updated;
   }
 
-  async remove(restaurantId: string, actorId: string, id: string) {
+  async remove(
+    restaurantId: string,
+    actorId: string,
+    id: string,
+    actor: SessionUser,
+  ) {
     if (id === actorId) {
       throw new BadRequestException('You cannot delete your own account');
     }
 
     const existing = await this.prisma.user.findFirst({
       where: { id, restaurantId },
-      include: { role: true },
+      include: {
+        role: { include: { permissions: { include: { permission: true } } } },
+        permissionOverrides: { include: { permission: true } },
+      },
     });
     if (!existing) {
       throw new NotFoundException('Staff account not found');
     }
+    assertMayManageRole(actor, userCeilingSubject(existing));
 
     if (existing.role.name === 'OWNER') {
       const otherActiveOwners = await this.prisma.user.count({
@@ -353,7 +394,7 @@ export class UsersService {
    */
   async setPermissionOverrides(
     restaurantId: string,
-    actor: { id: string; permissions: string[] },
+    actor: SessionUser,
     targetId: string,
     dto: SetPermissionOverridesDto,
   ) {
@@ -364,7 +405,10 @@ export class UsersService {
     }
     const target = await this.prisma.user.findFirst({
       where: { id: targetId, restaurantId },
-      include: { role: true },
+      include: {
+        role: { include: { permissions: { include: { permission: true } } } },
+        permissionOverrides: { include: { permission: true } },
+      },
     });
     if (!target) throw new NotFoundException('Staff account not found');
     if (target.role.name === 'OWNER') {
@@ -372,6 +416,9 @@ export class UsersService {
         'The owner role cannot have permission overrides',
       );
     }
+    // Editing overrides is account management like any other: a limited
+    // staff manager must not be able to lock out a stronger account.
+    assertMayManageRole(actor, userCeilingSubject(target));
 
     const keys = dto.overrides.map((o) => o.permissionKey);
     if (new Set(keys).size !== keys.length) {
@@ -388,7 +435,7 @@ export class UsersService {
       }
       if (
         o.effect === 'GRANT' &&
-        !actor.permissions.includes(o.permissionKey)
+        !permissionSatisfied(actor.permissions, o.permissionKey)
       ) {
         throw new BadRequestException(
           `You cannot grant "${o.permissionKey}" because you do not hold it yourself`,
@@ -444,6 +491,16 @@ export class UsersService {
     });
     if (!dept)
       throw new BadRequestException('Department not found for this restaurant');
+  }
+
+  private async roleWithKeys(restaurantId: string, roleId: string) {
+    return this.prisma.role.findFirstOrThrow({
+      where: { id: roleId, restaurantId },
+      select: {
+        name: true,
+        permissions: { select: { permission: { select: { key: true } } } },
+      },
+    });
   }
 
   private async assertRoleInRestaurant(restaurantId: string, roleId: string) {

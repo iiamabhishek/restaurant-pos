@@ -1,8 +1,11 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
+import { PauseBadge } from "@/components/menu/pause-badge";
 import {
   Dialog,
   DialogContent,
@@ -10,7 +13,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { formatCurrency } from "@/lib/format";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { Portion, PortionKind } from "@/components/pos/cart-line";
@@ -51,13 +53,19 @@ function defaultSelection(item: PickerItem): Record<string, Set<string>> {
 // lint rules flag as an avoidable derived-state effect.
 function ModifierPickerBody({
   item,
+  pauseLabel,
+  formatPrice,
   allowCustom,
   onConfirm,
 }: {
   item: PickerItem;
+  pauseLabel?: string;
+  formatPrice: (amount: number | string) => string;
   allowCustom: boolean;
   onConfirm: (modifierIds: string[], modifierLabel: string, portion?: Portion) => void;
 }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const hasPortions = item.halfPrice != null;
   const [portionKind, setPortionKind] = useState<PortionKind>("FULL");
   const [customLabel, setCustomLabel] = useState("");
@@ -91,7 +99,7 @@ function ModifierPickerBody({
     if (hasPortions) {
       const price = Number(customPrice);
       if (customPrice.trim() === "" || !Number.isFinite(price) || price < 0) {
-        toast.error(`Enter a price for the ${portionKind.toLowerCase()} portion`);
+        toast.error(t("Enter a price for the {value} portion", { value: fmt.code(portionKind) }));
         return;
       }
       portion =
@@ -103,7 +111,7 @@ function ModifierPickerBody({
       const count = selected[group.id]?.size ?? 0;
       const min = Math.max(group.minSelect, group.isRequired ? 1 : 0);
       if (count < min) {
-        toast.error(`Choose at least ${min} option(s) for ${group.name}`);
+        toast.error(t("Choose at least {min} option(s) for {name}", { min, name: group.name }));
         return;
       }
     }
@@ -124,13 +132,13 @@ function ModifierPickerBody({
       <div className="flex flex-col gap-5 py-2">
         {hasPortions && (
           <div className="flex flex-col gap-2">
-            <h3 className="text-sm font-medium text-foreground">Portion</h3>
+            <h3 className="text-sm font-medium text-foreground">{t("Portion")}</h3>
             <div className={cn("grid gap-2", allowCustom ? "grid-cols-3" : "grid-cols-2")}>
               {(
                 [
-                  { kind: "HALF", label: "Half", price: item.halfPrice },
-                  { kind: "FULL", label: "Full", price: item.price },
-                  ...(allowCustom ? [{ kind: "CUSTOM", label: "Custom", price: null }] : []),
+                  { kind: "HALF", label: t("Half"), price: item.halfPrice },
+                  { kind: "FULL", label: t("Full"), price: item.price },
+                  ...(allowCustom ? [{ kind: "CUSTOM", label: t("Custom"), price: null }] : []),
                 ] as { kind: PortionKind; label: string; price?: string | null }[]
               ).map((opt) => (
                 <button
@@ -148,7 +156,7 @@ function ModifierPickerBody({
                   <span>{opt.label}</span>
                   {opt.kind !== "CUSTOM" && prices[opt.kind] !== "" && (
                     <span className="text-xs font-normal tabular-nums text-muted-foreground">
-                      {formatCurrency(prices[opt.kind])}
+                      {formatPrice(prices[opt.kind])}
                     </span>
                   )}
                 </button>
@@ -157,11 +165,11 @@ function ModifierPickerBody({
             <div className={cn("grid gap-2", portionKind === "CUSTOM" ? "grid-cols-[1fr_7rem]" : "grid-cols-1")}>
               {portionKind === "CUSTOM" && (
                 <Input
-                  placeholder="Label, e.g. Quarter"
+                  placeholder={t("Label, e.g. Quarter")}
                   maxLength={40}
                   value={customLabel}
                   onChange={(e) => setCustomLabel(e.target.value)}
-                  aria-label="Custom portion label"
+                  aria-label={t("Custom portion label")}
                 />
               )}
               <Input
@@ -169,20 +177,25 @@ function ModifierPickerBody({
                 inputMode="decimal"
                 min="0"
                 step="0.01"
-                placeholder="Price"
+                placeholder={t("Price")}
                 value={customPrice}
                 onChange={(e) => setPrices((p) => ({ ...p, [portionKind]: e.target.value }))}
-                aria-label={`${portionKind.toLowerCase()} portion price`}
+                aria-label={t("{value} portion price", { value: fmt.code(portionKind) })}
               />
             </div>
           </div>
         )}
         {groups.map((group) => (
-          <div key={group.id} className="flex flex-col gap-2">
+          <div
+            key={group.id}
+            role="group"
+            aria-label={group.name}
+            className="flex flex-col gap-2"
+          >
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-medium text-foreground">{group.name}</h3>
               <span className="text-xs text-muted-foreground">
-                {group.maxSelect === 1 ? "Choose 1" : `Choose up to ${group.maxSelect}`}
+                {group.maxSelect === 1 ? t("Choose 1") : t("Choose up to {maxSelect}", { maxSelect: group.maxSelect })}
               </span>
             </div>
             <div className="flex flex-col gap-1.5">
@@ -192,6 +205,7 @@ function ModifierPickerBody({
                   <button
                     key={mod.id}
                     type="button"
+                    aria-pressed={isSelected}
                     onClick={() => toggle(group.id, mod.id, group.maxSelect)}
                     className={cn(
                       "flex items-center justify-between rounded-lg border px-3 py-2 text-sm transition-colors",
@@ -203,7 +217,7 @@ function ModifierPickerBody({
                     <span>{mod.name}</span>
                     {Number(mod.priceAdjustment) > 0 && (
                       <span className="text-xs text-muted-foreground">
-                        +{formatCurrency(mod.priceAdjustment)}
+                        +{formatPrice(mod.priceAdjustment)}
                       </span>
                     )}
                   </button>
@@ -215,7 +229,8 @@ function ModifierPickerBody({
       </div>
 
       <DialogFooter>
-        <Button onClick={handleConfirm}>Add to cart</Button>
+        <PauseBadge label={pauseLabel} />
+        <Button disabled={!!pauseLabel} onClick={handleConfirm}>{t("Add to cart")}</Button>
       </DialogFooter>
     </>
   );
@@ -223,17 +238,22 @@ function ModifierPickerBody({
 
 export function ModifierPickerDialog({
   item,
+  pauseLabel,
+  formatPrice,
   open,
   onOpenChange,
   onConfirm,
   allowCustom = false,
 }: {
   item: PickerItem | null;
+  pauseLabel?: string;
+  formatPrice?: (amount: number | string) => string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: (modifierIds: string[], modifierLabel: string, portion?: Portion) => void;
   allowCustom?: boolean;
 }) {
+  const fmt = useStaffFormat();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -241,6 +261,8 @@ export function ModifierPickerDialog({
           <ModifierPickerBody
             key={item.id}
             item={item}
+            pauseLabel={pauseLabel}
+            formatPrice={formatPrice ?? fmt.currency}
             allowCustom={allowCustom}
             onConfirm={(modifierIds, label, portion) => {
               onConfirm(modifierIds, label, portion);

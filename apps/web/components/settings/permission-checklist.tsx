@@ -1,5 +1,6 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
 import { PERMISSIONS } from "@nodedr-restaurant/types";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -25,12 +26,13 @@ export function PermissionChecklist({
   selected: string[];
   onToggle: (key: string) => void;
 }) {
+  const fmt = useStaffFormat();
   return (
     <div className="flex max-h-72 flex-col gap-4 overflow-y-auto rounded-lg border border-border p-3">
       {GROUPED_PERMISSIONS.map(([category, permissions]) => (
         <div key={category} className="flex flex-col gap-2">
           <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            {category}
+            {fmt.label(category)}
           </p>
           {permissions.map((permission) => (
             <label
@@ -41,7 +43,7 @@ export function PermissionChecklist({
                 checked={selected.includes(permission.key)}
                 onCheckedChange={() => onToggle(permission.key)}
               />
-              {permission.label}
+              {fmt.label(permission.label)}
             </label>
           ))}
         </div>

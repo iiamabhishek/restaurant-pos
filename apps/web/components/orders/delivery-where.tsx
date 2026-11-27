@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { MapPin, Navigation } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -28,12 +29,13 @@ export function hasDeliveryWhere(o: DeliveryWhereOrder) {
 
 /** Where to deliver: address, landmark and a Google Maps link. Shown wherever staff accept or manage an order. */
 export function DeliveryWhere({ order }: { order: DeliveryWhereOrder }) {
+  const { t } = useI18n();
   if (!hasDeliveryWhere(order)) return null;
   const href = mapsLink(order);
   const pinned = order.deliveryLat != null && order.deliveryLng != null;
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Deliver to</div>
+      <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("Deliver to")}</div>
       {order.deliveryAddress && (
         <p className="flex items-start gap-2 text-foreground">
           <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
@@ -44,10 +46,10 @@ export function DeliveryWhere({ order }: { order: DeliveryWhereOrder }) {
         </p>
       )}
       {order.deliveryPlace && (
-        <p className="text-xs text-muted-foreground">Landmark: {order.deliveryPlace}</p>
+        <p className="text-xs text-muted-foreground">{t("Landmark: {deliveryPlace}", { deliveryPlace: order.deliveryPlace })}</p>
       )}
       {pinned && (
-        <p className="text-xs text-muted-foreground">The customer shared their live location.</p>
+        <p className="text-xs text-muted-foreground">{t("The customer shared their live location.")}</p>
       )}
       {href && (
         <a
@@ -56,7 +58,7 @@ export function DeliveryWhere({ order }: { order: DeliveryWhereOrder }) {
           rel="noreferrer"
           className={cn(buttonVariants({ variant: "outline", size: "sm" }), "w-full")}
         >
-          <Navigation className="mr-1.5 h-4 w-4" /> Open in Google Maps
+          <Navigation className="mr-1.5 h-4 w-4" /> {t("Open in Google Maps")}
         </a>
       )}
     </div>

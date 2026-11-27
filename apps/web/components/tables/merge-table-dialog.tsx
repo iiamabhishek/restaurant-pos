@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,7 +13,6 @@ import {
 import { useMergeOrder, useOpenOrders } from "@/hooks/use-orders";
 import type { RestaurantTable } from "@/hooks/use-tables";
 import { ApiError } from "@/lib/api";
-import { formatCurrency } from "@/lib/format";
 
 export function MergeTableDialog({
   branchId,
@@ -26,6 +27,8 @@ export function MergeTableDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const fmt = useStaffFormat();
+  const { t: translate } = useI18n();
   const { data: openOrders } = useOpenOrders(branchId);
   const merge = useMergeOrder(branchId);
 
@@ -41,11 +44,11 @@ export function MergeTableDialog({
       { targetOrderId: thisOrder.id, sourceOrderId: otherOrder.id },
       {
         onSuccess: () => {
-          toast.success(`Merged into ${table.name ?? `Table ${table.number}`}`);
+          toast.success(translate("Merged into {value}", { value: table.name ?? translate("Table {number}", { number: table.number }) }));
           onOpenChange(false);
         },
         onError: (err) =>
-          toast.error(err instanceof ApiError ? err.message : "Could not merge orders"),
+          toast.error(err instanceof ApiError ? err.message : translate("Could not merge orders")),
       },
     );
   };
@@ -55,17 +58,17 @@ export function MergeTableDialog({
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle>
-            Merge into {table.name ?? `Table ${table.number}`}
+            {translate("Merge into")} {table.name ?? translate("Table {number}", { number: table.number })}
           </DialogTitle>
         </DialogHeader>
 
         {!thisOrder ? (
           <p className="py-4 text-sm text-muted-foreground">
-            This table has no open order to merge into.
+            {translate("This table has no open order to merge into.")}
           </p>
         ) : otherOccupiedTables.length === 0 ? (
           <p className="py-4 text-sm text-muted-foreground">
-            No other tables have an open order right now.
+            {translate("No other tables have an open order right now.")}
           </p>
         ) : (
           <div className="flex flex-col gap-2 py-2">
@@ -79,9 +82,9 @@ export function MergeTableDialog({
                   disabled={merge.isPending}
                   onClick={() => handleMerge(t.id)}
                 >
-                  <span>{t.name ?? `Table ${t.number}`}</span>
+                  <span>{t.name ?? translate("Table {number}", { number: t.number })}</span>
                   <span className="text-muted-foreground">
-                    {order && formatCurrency(order.totalAmount)}
+                    {order && fmt.currency(order.totalAmount)}
                   </span>
                 </Button>
               );

@@ -152,8 +152,15 @@ Rules (server-enforced):
   name/note. Subtotal, tax and total are recomputed from the lines; lines the kitchen has started are
   locked; the last line cannot be removed (cancel instead); raising a quantity goes through *Add another
   round* so the kitchen gets a new ticket. Every change is written to the audit log with before/after.
-- **Paid bills are never edited in place** (`400`). Correct them with *Refund* (money, and stock for the
-  units that came back). Admins can still delete finished orders (password-confirmed, audit snapshot).
+- **Paid bills are never edited in place** (`400`). Use *Refund* to correct the payment and record any returned stock.
+- Permanent deletion requires an owner or administrator, the deletion permission and password confirmation.
+  A payment or refund protects the order even after a full refund. A pending, successful or unresolved
+  gateway payment or refund also protects it (`409`), and the existing VERI*FACTU protection applies.
+  One protected order blocks the entire selection. Eligible finished orders, such as unpaid cancellations,
+  leave an audit entry when deleted.
+- Removing a customer profile detaches their orders, gift cards and loyalty entries. The points history
+  stays available for reconciliation. A later refund cannot transfer a deleted customer's points to
+  another customer who was subsequently assigned to the order.
 - Moving a bill onto a table that has its own open bill is refused (409); merge the bills instead.
 
 ## KDS station

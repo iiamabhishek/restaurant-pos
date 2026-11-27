@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { MoreHorizontal } from "lucide-react";
 import { CreateInvoiceDialog } from "@/components/inventory/create-invoice-dialog";
 import { CreatePurchaseRequestDialog } from "@/components/inventory/create-purchase-request-dialog";
@@ -35,7 +37,6 @@ import {
   type SupplierInvoice,
   type SupplierQuotation,
 } from "@/hooks/use-inventory";
-import { formatCurrency } from "@/lib/format";
 
 const REQUEST_NEXT: Record<PurchaseRequest["status"], PurchaseRequest["status"][]> = {
   DRAFT: ["PENDING_APPROVAL"],
@@ -69,6 +70,8 @@ function EmptyState({ title, description }: { title: string; description: string
 }
 
 function PurchaseRequestsSection({ branchId }: { branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data: requests, isLoading } = usePurchaseRequests(branchId);
   const updateStatus = useUpdatePurchaseRequestStatus(branchId);
 
@@ -76,8 +79,8 @@ function PurchaseRequestsSection({ branchId }: { branchId: string | null }) {
     <Card className="overflow-hidden p-0">
       <div className="flex items-center justify-between border-b border-border p-4">
         <div>
-          <h2 className="text-sm font-semibold text-foreground">Purchase requests</h2>
-          <p className="text-xs text-muted-foreground">Staff-raised requests, awaiting approval before a PO is cut</p>
+          <h2 className="text-sm font-semibold text-foreground">{t("Purchase requests")}</h2>
+          <p className="text-xs text-muted-foreground">{t("Staff-raised requests, awaiting approval before a PO is cut")}</p>
         </div>
         <CreatePurchaseRequestDialog branchId={branchId} />
       </div>
@@ -91,10 +94,10 @@ function PurchaseRequestsSection({ branchId }: { branchId: string | null }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Request #</TableHead>
-              <TableHead>Requested by</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Items</TableHead>
+              <TableHead>{t("Request #")}</TableHead>
+              <TableHead>{t("Requested by")}</TableHead>
+              <TableHead>{t("Status")}</TableHead>
+              <TableHead className="text-right">{t("Items")}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -106,7 +109,7 @@ function PurchaseRequestsSection({ branchId }: { branchId: string | null }) {
                   <TableCell className="font-medium text-foreground">{r.requestNumber}</TableCell>
                   <TableCell className="text-muted-foreground">{r.requestedBy.name}</TableCell>
                   <TableCell>
-                    <Badge variant="secondary">{r.status.replace("_", " ")}</Badge>
+                    <Badge variant="secondary">{fmt.code(r.status)}</Badge>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{r.items.length}</TableCell>
                   <TableCell className="w-10">
@@ -124,9 +127,7 @@ function PurchaseRequestsSection({ branchId }: { branchId: string | null }) {
                             <DropdownMenuItem
                               key={status}
                               onClick={() => updateStatus.mutate({ id: r.id, status })}
-                            >
-                              Move to {status.replace("_", " ").toLowerCase()}
-                            </DropdownMenuItem>
+                            >{t("Move to {code}", { code: fmt.code(status) })}</DropdownMenuItem>
                           ))}
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -139,8 +140,8 @@ function PurchaseRequestsSection({ branchId }: { branchId: string | null }) {
         </Table>
       ) : (
         <EmptyState
-          title="No purchase requests yet"
-          description="Staff can raise a request here before a purchase order is cut."
+          title={t("No purchase requests yet")}
+          description={t("Staff can raise a request here before a purchase order is cut.")}
         />
       )}
     </Card>
@@ -148,6 +149,8 @@ function PurchaseRequestsSection({ branchId }: { branchId: string | null }) {
 }
 
 function QuotationsSection({ branchId }: { branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data: quotations, isLoading } = useQuotations(branchId);
   const updateStatus = useUpdateQuotationStatus(branchId);
 
@@ -155,8 +158,8 @@ function QuotationsSection({ branchId }: { branchId: string | null }) {
     <Card className="overflow-hidden p-0">
       <div className="flex items-center justify-between border-b border-border p-4">
         <div>
-          <h2 className="text-sm font-semibold text-foreground">Supplier quotations</h2>
-          <p className="text-xs text-muted-foreground">Compare prices across suppliers before ordering</p>
+          <h2 className="text-sm font-semibold text-foreground">{t("Supplier quotations")}</h2>
+          <p className="text-xs text-muted-foreground">{t("Compare prices across suppliers before ordering")}</p>
         </div>
         <CreateQuotationDialog branchId={branchId} />
       </div>
@@ -170,10 +173,10 @@ function QuotationsSection({ branchId }: { branchId: string | null }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Quote #</TableHead>
-              <TableHead>Supplier</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Items</TableHead>
+              <TableHead>{t("Quote #")}</TableHead>
+              <TableHead>{t("Supplier")}</TableHead>
+              <TableHead>{t("Status")}</TableHead>
+              <TableHead className="text-right">{t("Items")}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -185,7 +188,7 @@ function QuotationsSection({ branchId }: { branchId: string | null }) {
                   <TableCell className="font-medium text-foreground">{q.quotationNumber}</TableCell>
                   <TableCell className="text-muted-foreground">{q.supplier.name}</TableCell>
                   <TableCell>
-                    <Badge variant="secondary">{q.status}</Badge>
+                    <Badge variant="secondary">{fmt.code(q.status)}</Badge>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{q.items.length}</TableCell>
                   <TableCell className="w-10">
@@ -203,9 +206,7 @@ function QuotationsSection({ branchId }: { branchId: string | null }) {
                             <DropdownMenuItem
                               key={status}
                               onClick={() => updateStatus.mutate({ id: q.id, status })}
-                            >
-                              Mark {status.toLowerCase()}
-                            </DropdownMenuItem>
+                            >{t("Mark {code}", { code: fmt.code(status) })}</DropdownMenuItem>
                           ))}
                         </DropdownMenuContent>
                       </DropdownMenu>
@@ -218,8 +219,8 @@ function QuotationsSection({ branchId }: { branchId: string | null }) {
         </Table>
       ) : (
         <EmptyState
-          title="No quotations recorded yet"
-          description="Log a supplier's quoted price to compare it against others for the same ingredient."
+          title={t("No quotations recorded yet")}
+          description={t("Log a supplier's quoted price to compare it against others for the same ingredient.")}
         />
       )}
     </Card>
@@ -227,14 +228,16 @@ function QuotationsSection({ branchId }: { branchId: string | null }) {
 }
 
 function SupplierInvoicesSection({ branchId }: { branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data: invoices, isLoading } = useSupplierInvoices(branchId);
 
   return (
     <Card className="overflow-hidden p-0">
       <div className="flex items-center justify-between border-b border-border p-4">
         <div>
-          <h2 className="text-sm font-semibold text-foreground">Vendor invoices</h2>
-          <p className="text-xs text-muted-foreground">Track what suppliers have billed and what&apos;s been paid</p>
+          <h2 className="text-sm font-semibold text-foreground">{t("Vendor invoices")}</h2>
+          <p className="text-xs text-muted-foreground">{t("Track what suppliers have billed and what's been paid")}</p>
         </div>
         <CreateInvoiceDialog branchId={branchId} />
       </div>
@@ -248,11 +251,11 @@ function SupplierInvoicesSection({ branchId }: { branchId: string | null }) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Invoice #</TableHead>
-              <TableHead>Supplier</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Total</TableHead>
-              <TableHead className="text-right">Paid</TableHead>
+              <TableHead>{t("Invoice #")}</TableHead>
+              <TableHead>{t("Supplier")}</TableHead>
+              <TableHead>{t("Status")}</TableHead>
+              <TableHead className="text-right">{t("Total")}</TableHead>
+              <TableHead className="text-right">{t("Paid")}</TableHead>
               <TableHead />
             </TableRow>
           </TableHeader>
@@ -262,13 +265,13 @@ function SupplierInvoicesSection({ branchId }: { branchId: string | null }) {
                 <TableCell className="font-medium text-foreground">{inv.invoiceNumber}</TableCell>
                 <TableCell className="text-muted-foreground">{inv.supplier.name}</TableCell>
                 <TableCell>
-                  <Badge variant={INVOICE_BADGE[inv.status]}>{inv.status.replace("_", " ")}</Badge>
+                  <Badge variant={INVOICE_BADGE[inv.status]}>{fmt.code(inv.status)}</Badge>
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {formatCurrency(Number(inv.totalAmount))}
+                  {fmt.currency(Number(inv.totalAmount))}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {formatCurrency(Number(inv.amountPaid))}
+                  {fmt.currency(Number(inv.amountPaid))}
                 </TableCell>
                 <TableCell className="w-32">
                   {(inv.status === "UNPAID" || inv.status === "PARTIALLY_PAID") && (
@@ -281,8 +284,8 @@ function SupplierInvoicesSection({ branchId }: { branchId: string | null }) {
         </Table>
       ) : (
         <EmptyState
-          title="No vendor invoices yet"
-          description="Add an invoice a supplier has billed you to start tracking payments against it."
+          title={t("No vendor invoices yet")}
+          description={t("Add an invoice a supplier has billed you to start tracking payments against it.")}
         />
       )}
     </Card>
@@ -290,14 +293,15 @@ function SupplierInvoicesSection({ branchId }: { branchId: string | null }) {
 }
 
 export default function ProcurementPage() {
+  const { t } = useI18n();
   const { branchId } = useBranch();
 
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Inventory</h1>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("Inventory")}</h1>
         <p className="text-sm text-muted-foreground">
-          Ingredients, recipe costing, purchase orders, and waste
+          {t("Stock, daily production, purchasing, and food waste")}
         </p>
       </div>
 

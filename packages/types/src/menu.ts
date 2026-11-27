@@ -11,7 +11,9 @@ export const menuCategorySchema = z.object({
 export type MenuCategoryDto = z.infer<typeof menuCategorySchema>;
 
 export const modifierSchema = z.object({
-  name: z.string().min(1),
+  // Present when editing an existing option, so it is updated in place (past orders keep pointing at it).
+  id: z.string().optional(),
+  name: z.string().trim().min(1).max(80),
   priceAdjustment: z.coerce.number().default(0),
   taxRatePercent: z.coerce.number().optional(),
   kitchenNote: z.string().optional(),
@@ -35,7 +37,7 @@ export const menuItemSchema = z.object({
   name: z.string().min(1),
   sku: z.string().optional(),
   description: z.string().optional(),
-  imageUrl: z.string().optional(),
+  imageUrl: z.string().nullable().optional(),
   price: z.coerce.number().nonnegative(),
   // Set to enable the Half / Full / Custom portion picker; `price` is the full portion.
   halfPrice: z.number().nonnegative().nullable().optional(),
@@ -57,3 +59,10 @@ export const menuItemSchema = z.object({
   modifierGroupIds: z.array(z.string()).default([]),
 });
 export type MenuItemDto = z.infer<typeof menuItemSchema>;
+
+export const menuItemPauseSchema = z.union([
+  z.strictObject({ minutes: z.number().int().min(1).max(1440) }),
+  z.strictObject({ localTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/) }),
+  z.strictObject({ resume: z.literal(true) }),
+]);
+export type MenuItemPauseDto = z.infer<typeof menuItemPauseSchema>;

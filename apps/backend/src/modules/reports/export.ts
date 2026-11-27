@@ -48,6 +48,13 @@ export async function buildXlsx(
     };
   });
   for (const row of r.rows) ws.addRow(row.map(cell));
+  if (r.totals) {
+    const t = ws.addRow(r.totals.map(cell));
+    t.font = { bold: true };
+    t.eachCell((c) => {
+      c.border = { top: { style: 'thin' } };
+    });
+  }
   r.columns.forEach((name, i) => {
     const widest = Math.max(
       name.length,
@@ -91,6 +98,7 @@ export function buildPdf(r: ReportResult, subtitle: string): Promise<Buffer> {
       if (y > doc.page.height - 60) {
         doc.addPage();
         drawRow(r.columns, true);
+        drawRow(vals, bold);
         return;
       }
       doc
@@ -114,6 +122,7 @@ export function buildPdf(r: ReportResult, subtitle: string): Promise<Buffer> {
 
     drawRow(r.columns, true);
     for (const row of r.rows) drawRow(row.map(fmt), false);
+    if (r.totals) drawRow(r.totals.map(fmt), true);
     if (!r.rows.length) {
       doc
         .moveDown()
@@ -130,7 +139,11 @@ export async function renderReport(
   format: ExportFormat,
   subtitle: string,
 ): Promise<Buffer> {
-  if (format === 'csv') return Buffer.from(toCsv(r.columns, r.rows), 'utf8');
+  if (format === 'csv')
+    return Buffer.from(
+      toCsv(r.columns, r.totals ? [...r.rows, r.totals] : r.rows),
+      'utf8',
+    );
   if (format === 'xlsx') return buildXlsx(r, subtitle);
   return buildPdf(r, subtitle);
 }

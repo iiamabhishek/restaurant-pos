@@ -51,19 +51,29 @@ export class CustomersService {
     return customer;
   }
 
+  // An empty PIN code means "none", stored as null.
+  private clean(dto: Partial<CustomerDto>) {
+    return dto.pincode === undefined
+      ? dto
+      : { ...dto, pincode: dto.pincode || null };
+  }
+
   create(branchId: string, dto: CustomerDto) {
-    return this.prisma.customer.create({ data: { ...dto, branchId } });
+    return this.prisma.customer.create({
+      data: { ...this.clean(dto), branchId },
+    });
   }
 
   async update(branchId: string, id: string, dto: Partial<CustomerDto>) {
     await this.assertInBranch(branchId, id);
-    return this.prisma.customer.update({ where: { id }, data: dto });
+    return this.prisma.customer.update({
+      where: { id },
+      data: this.clean(dto),
+    });
   }
 
-  // Hard delete — Order.customerId and GiftCard.customerId are both
-  // optional with onDelete: SetNull (schema.prisma), so this never orphans
-  // or blocks on past orders/gift cards; it just detaches them from the
-  // profile being removed.
+  // Orders, gift cards and points ledger entries retain their history when
+  // the database detaches them from the deleted profile.
   async remove(branchId: string, id: string) {
     await this.assertInBranch(branchId, id);
     await this.prisma.customer.delete({ where: { id } });

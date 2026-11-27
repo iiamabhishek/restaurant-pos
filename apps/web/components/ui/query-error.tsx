@@ -1,19 +1,20 @@
 "use client";
 
+import { type Translate, useI18n } from "@/lib/i18n/context";
 import { RefreshCw } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 /** Plain-language reason a request failed, naming a permission problem as one. */
-export function describeLoadError(error: unknown, what: string): string {
+export function describeLoadError(t: Translate, error: unknown, what: string): string {
   if (error instanceof ApiError) {
-    if (error.status === 401) return `Your session has ended. Sign in again to load ${what}.`;
-    if (error.status === 403) return `Your role is not allowed to see ${what}. Ask an administrator to grant access.`;
-    if (error.status >= 500) return `The server had a problem loading ${what}. Try again in a moment.`;
-    return error.message || `Could not load ${what}.`;
+    if (error.status === 401) return t("Your session has ended. Sign in again to load {what}.", { what });
+    if (error.status === 403) return t("Your role is not allowed to see {what}. Ask an administrator to grant access.", { what });
+    if (error.status >= 500) return t("The server had a problem loading {what}. Try again in a moment.", { what });
+    return error.message || t("Could not load {what}.", { what });
   }
-  return `Could not reach the server to load ${what}. Check the connection and try again.`;
+  return t("Could not reach the server to load {what}. Check the connection and try again.", { what });
 }
 
 // Shown in place of a list/grid whose request failed, so a failure is never
@@ -31,6 +32,7 @@ export function QueryError({
   retrying?: boolean;
   className?: string;
 }) {
+  const { t } = useI18n();
   return (
     <div
       role="alert"
@@ -39,10 +41,10 @@ export function QueryError({
         className,
       )}
     >
-      <p className="max-w-sm text-sm text-foreground">{describeLoadError(error, what)}</p>
+      <p className="max-w-sm text-sm text-foreground">{describeLoadError(t, error, what)}</p>
       <Button type="button" variant="outline" className="h-11 px-4" disabled={retrying} onClick={onRetry}>
         <RefreshCw className={cn("h-4 w-4", retrying && "animate-spin")} aria-hidden />
-        {retrying ? "Retrying…" : "Try again"}
+        {retrying ? t("Retrying…") : t("Try again")}
       </Button>
     </div>
   );

@@ -37,9 +37,22 @@ export const PERMISSIONS = [
   { key: "delivery.rider", label: "Use the Rider App (own deliveries)", category: "Delivery" },
   { key: "staff.manage", label: "Manage Staff Schedules, Leave & Payroll", category: "Staff" },
   { key: "accounting.manage", label: "Manage Accounting", category: "Accounting" },
+  { key: "expenses.submit", label: "Submit Expenses for Approval", category: "Accounting" },
+  { key: "expenses.approve", label: "Approve or Reject Expenses", category: "Accounting" },
+  { key: "pettycash.manage", label: "Keep the Petty Cash Box", category: "Accounting" },
   { key: "marketing.manage", label: "Manage Coupons, Promotions & Campaigns", category: "Marketing" },
   { key: "operations.manage", label: "Manage Equipment & Documents", category: "Operations" },
   { key: "system.update", label: "Manage App Updates", category: "Admin" },
+  { key: "production.record", label: "Record Daily Production & Food Waste", category: "Inventory" },
+  { key: "production.void", label: "Reverse Production & Approve Food Waste", category: "Inventory" },
+  { key: "production.post", label: "Post Production Batches (drafting needs only Record)", category: "Inventory" },
+  { key: "production.report", label: "View Manufacturing Reports", category: "Inventory" },
+  { key: "production.quality", label: "Record Batch Quality Inspection Results", category: "Inventory" },
+  { key: "journal.manage", label: "Manage the Stock Journal (all entry types, link menu items to stock)", category: "Inventory" },
+  { key: "menu.price", label: "Change Menu Selling Prices from the Stock Journal", category: "Menu" },
+  { key: "nfc.manage", label: "Manage NFC Table Tags & Table Ordering Mode", category: "Tables" },
+  { key: "table.session", label: "Open & Close Table Sessions (guest ordering codes)", category: "Tables" },
+  { key: "ratings.view", label: "View Customer Ratings", category: "CRM" },
 ] as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[number]["key"];
@@ -48,11 +61,20 @@ export type PermissionKey = (typeof PERMISSIONS)[number]["key"];
 // that predate the *.view keys (and custom roles) keep working unchanged.
 export const PERMISSION_IMPLIES: Partial<Record<PermissionKey, PermissionKey[]>> = {
   "menu.manage": ["menu.view"],
+  // Accounting managers keep recording expenses directly, as before, and also run the petty cash box.
+  "accounting.manage": ["expenses.submit", "expenses.approve", "pettycash.manage"],
   "tables.manage": ["tables.view"],
+  // Whoever manages inventory may also record and reverse production.
+  "inventory.manage": ["production.record", "production.void", "production.post", "production.report", "production.quality", "journal.manage"],
+  // The Stock Journal manager runs every kind of journal entry, so it carries all the production permissions too.
+  "journal.manage": ["production.record", "production.void", "production.post", "production.report", "production.quality"],
 };
 
 /** True when `held` satisfies `required`, directly or through PERMISSION_IMPLIES. */
 export function permissionSatisfied(held: readonly string[], required: string): boolean {
+  // A live DENY override is carried as `!key` by effectivePermissions(). It
+  // wins over both direct grants and implied permissions.
+  if (held.includes(`!${required}`)) return false;
   if (held.includes(required)) return true;
   return Object.entries(PERMISSION_IMPLIES).some(
     ([owner, implied]) => held.includes(owner) && (implied as string[]).includes(required),
@@ -77,6 +99,7 @@ export const STAFF_ROLES = [
   "DELIVERY_STAFF",
   "ACCOUNTANT",
   "INVENTORY_MANAGER",
+  "STOCK_JOURNAL_MANAGER",
 ] as const;
 
 export type StaffRole = (typeof STAFF_ROLES)[number];
@@ -93,19 +116,23 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<StaffRole, PermissionKey[]> = {
     "inventory.manage", "reports.access", "kds.manage",
     "reservations.manage", "customers.manage", "refunds.process",
     "attendance.manage", "delivery.manage", "staff.manage", "accounting.manage", "marketing.manage", "operations.manage",
+    "menu.price", "table.session", "ratings.view", "nfc.manage",
   ],
   CASHIER: [
-    "orders.create", "orders.edit", "orders.accept", "bills.print", "discounts.apply",
+    "table.session", "orders.create", "orders.edit", "orders.accept", "bills.print", "discounts.apply",
     "sales.view", "customers.manage", "dashboard.sales.view",
-    "menu.view", "tables.view",
+    "menu.view", "tables.view", "expenses.submit",
   ],
   // Waiters read the menu and floor plan and run orders; they cannot edit
   // either, and have no revenue access.
-  WAITER: ["orders.create", "orders.edit", "orders.accept", "tables.view", "menu.view", "bills.print"],
-  KITCHEN_STAFF: ["kds.manage", "orders.accept"],
-  CHEF: ["kds.manage", "orders.accept", "menu.manage", "menu.view"],
+  WAITER: ["table.session", "orders.create", "orders.edit", "orders.accept", "tables.view", "menu.view", "bills.print"],
+  KITCHEN_STAFF: ["kds.manage", "orders.accept", "production.record", "production.post"],
+  CHEF: ["kds.manage", "orders.accept", "menu.manage", "menu.view", "production.record", "production.post", "production.quality"],
   BARTENDER: ["orders.create", "orders.accept", "kds.manage", "menu.view", "tables.view"],
   DELIVERY_STAFF: ["orders.edit", "delivery.manage", "delivery.rider"],
   ACCOUNTANT: ["sales.view", "dashboard.sales.view", "reports.access", "reports.financial.view", "data.export", "accounting.manage"],
   INVENTORY_MANAGER: ["inventory.manage", "reports.access"],
+  // Runs the Stock Journal (production, transfers, waste, corrections, quality, reversals) and can see the menu,
+  // but not suppliers, purchasing, recipes or other inventory settings.
+  STOCK_JOURNAL_MANAGER: ["journal.manage", "menu.view"],
 };

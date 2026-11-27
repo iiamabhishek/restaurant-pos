@@ -1,8 +1,12 @@
-# Agent rules — restaurant-pos
+# AGENTS.md — OrderRestro
 
-## Deployment policy (standing, user-mandated)
+## Integrating OrderRestro into a website or app
+Read [`prompts/AI_INTEGRATION_PROMPT.md`](prompts/AI_INTEGRATION_PROMPT.md). Essentials:
+- Websites use the **Integration API** (`/api/v1/integrations`, `ordr_ext_…` scoped keys), called **server-side only**.
+- MCP (`/api/v1/mcp`) uses **personal staff keys** that inherit a person's permissions; never ship one in a website.
+- OrderRestro is self-hosted: ask for the instance URL and key; never invent them or commit them.
+- The API places orders but does not capture payment. Show "paid" only if the API says so.
+- Exact schemas: [`docs/integrations-api.md`](docs/integrations-api.md), [`docs/website-integration.md`](docs/website-integration.md).
 
-- **Never deploy to production unless the user explicitly says "deploy"** (or equivalent).
-- Production = Render services `thetwoyaarcafe-api` / `thetwoyaarcafe-web` (branch `release_v1.1`, autoDeploy on push). Pushing to `release_v1.1` IS a deploy — do not push there casually.
-- **Test locally first**: `pnpm dev` runs backend (Nest, :4000) + web (Next, :3000) against the local Postgres (`localhost:5432/nodedr_restaurant`, service `postgresql-x64-17`). Local `.env` files keep dev fully isolated from the Supabase production DB.
-- Backend tests: `pnpm --filter @nodedr-restaurant/backend test`.
+## Working on this repo
+See `README.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`. Default branch is `master`. No Co-Authored-By trailers.

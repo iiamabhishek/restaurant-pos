@@ -1,7 +1,9 @@
+import { round2 } from '../../common/money';
 import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { permissionSatisfied } from '@nodedr-restaurant/types';
 import { BranchTimeService } from '../../common/services/branch-time.service';
@@ -15,10 +17,15 @@ export interface ReportResult {
   title: string;
   columns: string[];
   rows: CsvValue[][];
+  /** Grand-total line shown under the table and added to every export. */
+  totals?: CsvValue[];
+  /** Order id for each row, when a row is one bill (lets the UI open it). */
+  rowOrderIds?: string[];
 }
 
 export const REPORT_CATALOG = [
   { key: 'sales-daily', title: 'Daily sales', group: 'Sales' },
+  { key: 'invoices', title: 'All bills (day book)', group: 'Sales' },
   { key: 'sales-by-item', title: 'Sales by item', group: 'Sales' },
   { key: 'sales-by-category', title: 'Sales by category', group: 'Sales' },
   { key: 'popular-items', title: 'Popular items', group: 'Sales' },
@@ -47,6 +54,7 @@ export const REPORT_CATALOG = [
 // reports.access (e.g. to an inventory manager) never leaks sales figures.
 export const SALES_REPORT_KEYS: ReadonlySet<string> = new Set([
   'sales-daily',
+  'invoices',
   'sales-by-item',
   'sales-by-category',
   'popular-items',
@@ -80,7 +88,9 @@ export function assertCanViewReport(
   }
 }
 
-const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
+/** The day book lists at most this many bills at once; narrow the dates to see more. */
+export const INVOICE_ROW_CAP = 5000;
+
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 @Injectable()
@@ -90,6 +100,26 @@ export class ReportsService {
     private readonly time: BranchTimeService,
     private readonly accounting: AccountingService,
   ) {}
+
+  /**
+   * One bill, read-only, for people who may view sales reports but cannot take orders (an accountant opening a
+   * line of the day book). Branch-scoped: a bill of another branch is "not found".
+   */
+  async bill(branchId: string, orderId: string) {
+    const o = await this.prisma.order.findFirst({
+      where: { id: orderId, branchId },
+      include: {
+        items: true,
+        payments: { orderBy: { createdAt: 'asc' } },
+        refunds: { orderBy: { createdAt: 'asc' } },
+        customer: { select: { name: true, phone: true } },
+        table: { select: { number: true, name: true } },
+        createdBy: { select: { name: true } },
+      },
+    });
+    if (!o) throw new NotFoundException('Bill not found');
+    return o;
+  }
 
   catalog(permissions: readonly string[]) {
     return REPORT_CATALOG.filter((r) => canViewReport(permissions, r.key));
@@ -109,17 +139,25 @@ export class ReportsService {
     }
     if (to < from)
       throw new BadRequestException('"to" cannot be before "from"');
-    if (Date.parse(to) - Date.parse(from) > 366 * 86_400_000)
-      throw new BadRequestException('Choose a range of at most one year');
+    // Five years back covers every old invoice; the heavy per-bill report below is capped by rows instead.
+    if (Date.parse(to) - Date.parse(from) > 1830 * 86_400_000)
+      throw new BadRequestException('Choose a range of at most five years');
 
     const tz = await this.time.tzForBranch(branchId);
     const range = zonedRange(from, to, tz);
     const base = { key, title: entry.title };
-    const out = (columns: string[], rows: CsvValue[][]) => ({
+    const out = (
+      columns: string[],
+      rows: CsvValue[][],
+      totals?: CsvValue[],
+    ): ReportResult => ({
       ...base,
       columns,
       rows,
+      ...(totals ? { totals } : {}),
     });
+    const sumCol = (rows: CsvValue[][], i: number) =>
+      round2(rows.reduce((a, r) => a + Number(r[i] ?? 0), 0));
 
     switch (key) {
       case 'sales-daily': {
@@ -153,6 +191,16 @@ export class ReportsService {
           row.tips += Number(o.tipAmount);
           byDay.set(d, row);
         }
+        const dailyRows = [...byDay.entries()]
+          .sort()
+          .map(([d, r]) => [
+            d,
+            r.n,
+            round2(r.sales),
+            round2(r.tax),
+            round2(r.disc),
+            round2(r.tips),
+          ]);
         return out(
           [
             'Date',
@@ -162,17 +210,99 @@ export class ReportsService {
             'Discounts',
             'Tips',
           ],
-          [...byDay.entries()]
-            .sort()
-            .map(([d, r]) => [
-              d,
-              r.n,
-              round2(r.sales),
-              round2(r.tax),
-              round2(r.disc),
-              round2(r.tips),
-            ]),
+          dailyRows,
+          [
+            'Total',
+            dailyRows.reduce((a, r) => a + Number(r[1]), 0),
+            sumCol(dailyRows, 2),
+            sumCol(dailyRows, 3),
+            sumCol(dailyRows, 4),
+            sumCol(dailyRows, 5),
+          ],
         );
+      }
+
+      case 'invoices': {
+        const orders = await this.prisma.order.findMany({
+          where: { branchId, status: 'PAID', billedAt: range },
+          select: {
+            id: true,
+            orderNumber: true,
+            type: true,
+            billedAt: true,
+            subtotal: true,
+            discountAmount: true,
+            taxAmount: true,
+            tipAmount: true,
+            deliveryFee: true,
+            totalAmount: true,
+            guestName: true,
+            customer: { select: { name: true } },
+            table: { select: { number: true, name: true } },
+            createdBy: { select: { name: true } },
+            payments: { select: { method: true } },
+            refunds: { select: { amount: true } },
+          },
+          orderBy: { billedAt: 'asc' },
+          take: INVOICE_ROW_CAP + 1,
+        });
+        const truncated = orders.length > INVOICE_ROW_CAP;
+        if (truncated) orders.pop();
+        const rows: CsvValue[][] = orders.map((o) => {
+          const { minute } = localMinuteAndDay(o.billedAt!, tz);
+          const refunded = o.refunds.reduce((a, r) => a + Number(r.amount), 0);
+          return [
+            localDate(o.billedAt!, tz),
+            `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`,
+            o.orderNumber,
+            o.type.replace('_', ' ').toLowerCase(),
+            o.guestName ?? o.customer?.name ?? 'Walk-in',
+            o.table ? `T${o.table.number}` : '',
+            [...new Set(o.payments.map((p) => p.method))].join(' + '),
+            round2(Number(o.discountAmount)),
+            round2(Number(o.taxAmount)),
+            round2(Number(o.tipAmount)),
+            round2(Number(o.totalAmount)),
+            round2(refunded),
+            o.createdBy?.name ?? '',
+          ];
+        });
+        return {
+          ...out(
+            [
+              'Date',
+              'Time',
+              'Bill no.',
+              'Type',
+              'Customer',
+              'Table',
+              'Paid by',
+              'Discount',
+              'Tax included',
+              'Tips',
+              'Total',
+              'Refunded',
+              'Billed by',
+            ],
+            rows,
+            [
+              'Total',
+              '',
+              `${rows.length} bills${truncated ? ` (first ${INVOICE_ROW_CAP} only - narrow the dates)` : ''}`,
+              '',
+              '',
+              '',
+              '',
+              sumCol(rows, 7),
+              sumCol(rows, 8),
+              sumCol(rows, 9),
+              sumCol(rows, 10),
+              sumCol(rows, 11),
+              '',
+            ],
+          ),
+          rowOrderIds: orders.map((o) => o.id),
+        };
       }
 
       case 'sales-by-item':
@@ -254,14 +384,16 @@ export class ReportsService {
           _count: { _all: true },
           _sum: { amount: true },
         });
-        return out(
-          ['Method', 'Payments', 'Amount'],
-          g.map((r) => [
-            r.method,
-            r._count._all,
-            round2(Number(r._sum.amount ?? 0)),
-          ]),
-        );
+        const pmRows = g.map((r) => [
+          r.method,
+          r._count._all,
+          round2(Number(r._sum.amount ?? 0)),
+        ]);
+        return out(['Method', 'Payments', 'Amount'], pmRows, [
+          'Total',
+          pmRows.reduce((a, r) => a + Number(r[1]), 0),
+          sumCol(pmRows, 2),
+        ]);
       }
 
       case 'discounts': {
@@ -317,11 +449,13 @@ export class ReportsService {
       case 'peak-hours': {
         const orders = await this.prisma.order.findMany({
           where: { branchId, status: 'PAID', billedAt: range },
-          select: { createdAt: true, totalAmount: true },
+          select: { billedAt: true, totalAmount: true },
         });
         const cell = new Map<string, { n: number; sales: number }>();
         for (const o of orders) {
-          const { day, minute } = localMinuteAndDay(o.createdAt, tz);
+          // The range is filtered on billedAt; bucket on the same field so
+          // cross-midnight orders land in the day the report is asking about.
+          const { day, minute } = localMinuteAndDay(o.billedAt!, tz);
           const k = `${day}-${Math.floor(minute / 60)}`;
           const c = cell.get(k) ?? { n: 0, sales: 0 };
           c.n++;

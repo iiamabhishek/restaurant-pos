@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -46,6 +47,7 @@ export function StatusNote({
   onClear: () => void;
   className?: string;
 }) {
+  const { t } = useI18n();
   if (!note) return null;
   const { box, Icon } = STYLE[note.kind];
   return (
@@ -67,7 +69,7 @@ export function StatusNote({
           {note.action.label}
         </button>
       )}
-      <button type="button" aria-label="Dismiss message" className="shrink-0 opacity-70 hover:opacity-100" onClick={onClear}>
+      <button type="button" aria-label={t("Dismiss message")} className="shrink-0 opacity-70 hover:opacity-100" onClick={onClear}>
         <X className="h-4 w-4" />
       </button>
     </div>

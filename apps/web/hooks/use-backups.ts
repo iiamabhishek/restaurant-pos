@@ -1,6 +1,6 @@
 "use client";
 
-import type { RestoreBackupDto, SetBackupConfigDto } from "@nodedr-restaurant/types";
+import type { BackupSchedule, RestoreBackupDto, SetBackupConfigDto, SetBackupScheduleDto } from "@nodedr-restaurant/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
@@ -26,6 +26,7 @@ export interface BackupStatus {
   bucket: string | null;
   region: string | null;
   accessKeyIdMasked: string | null;
+  schedule: BackupSchedule;
   intervalDays: number;
   retainCount: number;
   lastBackup: BackupEntry | null;
@@ -59,6 +60,17 @@ export function useSetBackupConfig() {
       api.post<BackupStatus>("/backups/config", dto),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["backups"] });
+    },
+  });
+}
+
+export function useSetBackupSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (dto: SetBackupScheduleDto) =>
+      api.post<BackupStatus>("/backups/schedule", dto),
+    onSuccess: (status) => {
+      queryClient.setQueryData(["backups", "status"], status);
     },
   });
 }

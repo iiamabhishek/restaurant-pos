@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
@@ -6,6 +7,15 @@ using System.Text;
 using System.Text.RegularExpressions;
 
 namespace OrderRestro.Launcher;
+
+/// <summary>
+/// The program files in the working copy are damaged or missing and could not be restored. Distinct from a database
+/// problem so the window can say so (and say the data is untouched) instead of blaming the database.
+/// </summary>
+internal sealed class AppFilesException : InvalidOperationException
+{
+    public AppFilesException(string message) : base(message) { }
+}
 
 /// <summary>
 /// Owns the lifecycle of the embedded server: Postgres, the NestJS
@@ -32,10 +42,11 @@ internal sealed class ServerSupervisor : IDisposable
 
     public async Task StartAsync(CancellationToken ct)
     {
-        ServerPaths.EnsureDirectoriesExist();
+        var folderProblems = ServerPaths.EnsureDirectoriesExist();
 
         var firstRun = !File.Exists(ServerPaths.BackendEnvPath);
 
+        foreach (var problem in folderProblems) LogStartup($"WARNING: {problem}");
         LogStartup($"postgres bin dir: {ServerPaths.PostgresBinDir}");
         LogStartup($"postgres data dir: {ServerPaths.PgDataDir}");
         LogStartup($"postgres port: {ServerPaths.PostgresPort}");
@@ -53,19 +64,38 @@ internal sealed class ServerSupervisor : IDisposable
             WriteBackendEnv();
         }
 
-        Report("Running database migrations…");
-        await RunMigrationsAsync(ct);
+        if (await AllMigrationsAppliedAsync(ct))
+        {
+            // Normal start: nothing new to apply. Skipping the Prisma CLI here saves 30-60 s on every launch (it is a
+            // large Node program, and loading it is most of what "Running database migrations" used to cost).
+            LogStartup("migrations: all applied, skipping prisma migrate deploy");
+        }
+        else
+        {
+            Report("Updating the database…");
+            await RunMigrationsAsync(ct);
+        }
 
         Report("Starting server…");
         StartBackend();
-        LogStartup("backend process started, waiting for health check");
-        await WaitForHttpHealthAsync($"http://127.0.0.1:{ServerPaths.BackendPort}/api/health", TimeSpan.FromSeconds(45), ct);
+        // The web app boots in parallel: it does not need the backend to start, only to answer requests, so starting
+        // it now instead of after the backend's health check takes its whole boot time off the wait.
+        StartWeb();
+        LogStartup("backend and web processes started, waiting for health checks");
+        // Generous budget: the first start after install or update runs files that antivirus (Windows Defender) scans
+        // on first read, which on a modest PC can take minutes (backend took 2.5 min on a customer PC with 1.0.13.0,
+        // past the old limit). A crash is still reported at once - the wait ends as soon as the process exits.
+        await WaitForHttpHealthAsync($"http://127.0.0.1:{ServerPaths.BackendPort}/api/health", TimeSpan.FromMinutes(10), _backend, "backend", ct);
         LogStartup("backend health check: OK");
 
-        StartWeb();
-        LogStartup("web process started, waiting for health check");
-        await WaitForHttpHealthAsync($"http://127.0.0.1:{ServerPaths.WebPort}/api/health", TimeSpan.FromSeconds(45), ct);
+        Report("Starting the web app…");
+        await WaitForHttpHealthAsync($"http://127.0.0.1:{ServerPaths.WebPort}/api/health", TimeSpan.FromMinutes(5), _web, "web", ct);
         LogStartup("web health check: OK");
+
+        // /api/health is proxied to the backend, so it says nothing about whether the web app can actually serve its
+        // pages and JavaScript. A damaged working copy answered it fine and then showed a blank window.
+        Report("Checking the app files…");
+        await VerifyWebAppAsync(ct);
 
         Report("Ready.");
     }
@@ -117,7 +147,16 @@ internal sealed class ServerSupervisor : IDisposable
         var stamp = Path.Combine(ServerPaths.DataDir, "runtime.version");
         var pkgVersion = typeof(ServerSupervisor).Assembly.GetName().Version?.ToString() ?? "0";
         var stampOk = File.Exists(stamp) && File.ReadAllText(stamp).Trim() == pkgVersion;
-        if (File.Exists(ServerPaths.NodeExePath) && stampOk) return;
+        if (File.Exists(ServerPaths.NodeExePath) && stampOk)
+        {
+            // Same version, copy already made: confirm every file is still there at the right size (antivirus
+            // quarantine, a cleanup tool or an interrupted copy can leave holes), and put back whatever is not.
+            // A previous blank window asks for a full hash check this time.
+            var deep = File.Exists(RepairFlagPath);
+            await RepairRuntimeAsync(deep, ct, stopDatabase: true);
+            if (deep) { try { File.Delete(RepairFlagPath); } catch { } }
+            return;
+        }
         LogStartup($"runtime copy needed (package {pkgVersion}, stamp ok: {stampOk})");
         await StopStaleRuntimeAsync();
 
@@ -139,40 +178,320 @@ internal sealed class ServerSupervisor : IDisposable
                 $"Delete \"{AppConfig.ConfigPath}\" and relaunch to choose again, or reinstall using a package built with -IncludeEmbeddedServer.");
         }
 
-        Report("Setting up (first launch only — this can take a minute)…");
-        if (Directory.Exists(ServerPaths.RuntimeServerDir))
+        Directory.CreateDirectory(ServerPaths.RuntimeServerDir);
+        var copyWatch = Stopwatch.StartNew();
+        var incremental = await TrySyncChangedFilesAsync(ct);
+        if (!incremental)
+        {
+            Report("Setting up (first launch only — this can take a minute)…");
+            // robocopy, not a hand-rolled copy loop: this source tree is the final packaged/dereferenced output (see
+            // stage-server-assets.ps1) with no symlinks left in it. /MIR instead of delete-then-copy: files that are
+            // already identical are skipped and leftovers from an older version are removed. /MT copies many files at
+            // once (tens of thousands of small files - one at a time took almost 4 minutes on a customer PC).
+            // /NFL /NDL keep the log to a summary instead of one line per file.
+            var exitCode = await RunToolAsync(
+                "robocopy.exe",
+                $"\"{ServerPaths.InstallServerDir}\" \"{ServerPaths.RuntimeServerDir}\" /MIR /MT:16 /R:2 /W:2 /NFL /NDL /NP",
+                workingDir: ServerPaths.DataDir,
+                env: null,
+                "runtime-copy",
+                ct);
+            // robocopy's exit codes are a bitmask where 0-7 are all "success" variants - only 8+ is a real failure.
+            if (exitCode >= 8)
+            {
+                throw new InvalidOperationException($"Could not copy the embedded server runtime to a writable location (robocopy exit {exitCode}) — see {ServerPaths.ServerLogDir}\\runtime-copy.log");
+            }
+        }
+        LogStartup($"runtime copy done in {copyWatch.Elapsed.TotalSeconds:0.0}s");
+        // robocopy exit codes 0-7 all count as success, including "some files skipped"; do not trust it blindly.
+        // Size check only: hashing all ~28,000 files took 107 s on a PC with real-time antivirus, which is a long time to
+        // add to every update. A missing or cut-short file is what actually happens; the full hash is kept for when it
+        // is asked for (Repair-OrderRestro, the blank-page watchdog) and when the page check below fails.
+        await RepairRuntimeAsync(deep: false, ct, stopDatabase: true);
+        File.WriteAllText(stamp, pkgVersion);
+        try { File.Delete(RepairFlagPath); } catch { }
+    }
+
+    /// <summary>Dropped by the window when a page loaded but stayed blank; the next start then hashes every file.</summary>
+    internal static string RepairFlagPath => Path.Combine(ServerPaths.DataDir, "repair-requested.flag");
+
+    /// <summary>
+    /// Checks the working copy against the package's runtime-manifest.tsv (every file's size, and with
+    /// <paramref name="deep"/> its SHA-1) and copies back what is missing or different. Only touches the program
+    /// files under server-runtime; the database (pgdata), uploads and settings are never read or written here.
+    /// Throws <see cref="AppFilesException"/> if something cannot be restored.
+    /// </summary>
+    private async Task RepairRuntimeAsync(bool deep, CancellationToken ct, bool stopDatabase = false)
+    {
+        var manifestPath = Path.Combine(ServerPaths.InstallServerDir, ManifestName);
+        if (!File.Exists(manifestPath)) return;
+        var watch = Stopwatch.StartNew();
+        var entries = ReadManifest(manifestPath);
+        var bad = new ConcurrentBag<string>();
+        await Parallel.ForEachAsync(entries, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, (e, _) =>
+        {
+            if (!RuntimeFileMatches(e.Key, e.Value, deep)) bad.Add(e.Key);
+            return ValueTask.CompletedTask;
+        });
+        LogStartup($"runtime check ({(deep ? "full hash" : "size")}): {entries.Count} files, {bad.Count} missing or different, {watch.Elapsed.TotalSeconds:0.0}s");
+        if (bad.IsEmpty) return;
+
+        var sample = string.Join(", ", bad.Take(5));
+        LogStartup($"restoring {bad.Count} program files, e.g. {sample}");
+        Report($"Repairing program files… ({bad.Count})");
+        if (stopDatabase) await StopStaleRuntimeAsync(); else KillStrayWorkingProcesses();
+        var failed = new ConcurrentBag<string>();
+        await Parallel.ForEachAsync(bad, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (relPath, innerCt) =>
         {
             for (var attempt = 0; ; attempt++)
             {
-                try { Directory.Delete(ServerPaths.RuntimeServerDir, recursive: true); break; }
-                catch (IOException) when (attempt < 5) { await Task.Delay(1000, ct); }
-                catch (UnauthorizedAccessException) when (attempt < 5) { await Task.Delay(1000, ct); }
+                try
+                {
+                    var dst = RuntimePath(relPath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+                    File.Copy(InstallPath(relPath), dst, overwrite: true);
+                    if (RuntimeFileMatches(relPath, entries[relPath], deep: true)) return;
+                    throw new IOException("copy does not match the package");
+                }
+                catch (Exception ex) when (attempt < 3 && ex is IOException or UnauthorizedAccessException)
+                {
+                    await Task.Delay(500, innerCt);
+                }
+                catch (Exception ex)
+                {
+                    LogStartup($"could not restore {relPath}: {ex.Message}");
+                    failed.Add(relPath);
+                    return;
+                }
             }
-        }
-        Directory.CreateDirectory(ServerPaths.RuntimeServerDir);
-
-        // robocopy, not a hand-rolled copy loop: this source tree is the
-        // final packaged/dereferenced output (see stage-server-assets.ps1)
-        // with no symlinks left in it, so none of the reparse-point issues
-        // that ruled out robocopy for STAGING apply here — a plain
-        // real-file-to-real-file bulk copy is exactly what robocopy is
-        // actually good at.
-        var exitCode = await RunToolAsync(
-            "robocopy.exe",
-            $"\"{ServerPaths.InstallServerDir}\" \"{ServerPaths.RuntimeServerDir}\" /E /R:2 /W:2",
-            workingDir: ServerPaths.DataDir,
-            env: null,
-            "runtime-copy",
-            ct);
-        // robocopy's exit codes are a bitmask where 0-7 are all "success"
-        // variants (files copied / extra files present / etc.) — only 8+
-        // means a real failure.
-        if (exitCode >= 8)
+        });
+        if (failed.IsEmpty)
         {
-            throw new InvalidOperationException($"Could not copy the embedded server runtime to a writable location (robocopy exit {exitCode}) — see {ServerPaths.ServerLogDir}\\runtime-copy.log");
+            LogStartup($"restored {bad.Count} program files");
+            return;
         }
-        File.WriteAllText(stamp, pkgVersion);
+        throw new AppFilesException(
+            $"{failed.Count} of OrderRestro's program files are missing or damaged and could not be restored " +
+            $"(for example {string.Join(", ", failed.Take(3))}).\n\n" +
+            "This is usually antivirus software blocking or removing files, or a very long Windows user name " +
+            $"(longest file path here: {LongestPathHint()}). Your restaurant data has not been touched.\n\n" +
+            $"Details: {Path.Combine(ServerPaths.ServerLogDir, "startup.log")}");
     }
+
+    private bool RuntimeFileMatches(string relPath, string sizeAndHash, bool deep)
+    {
+        try
+        {
+            var sep = sizeAndHash.IndexOf(':');
+            var size = long.Parse(sizeAndHash[..sep]);
+            var info = new FileInfo(RuntimePath(relPath));
+            if (!info.Exists || info.Length != size) return false;
+            if (!deep) return true;
+            using var fs = new FileStream(info.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return Convert.ToHexString(SHA1.HashData(fs)).Equals(sizeAndHash[(sep + 1)..], StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string LongestPathHint()
+    {
+        try
+        {
+            var longest = File.ReadLines(Path.Combine(ServerPaths.InstallServerDir, ManifestName))
+                .Select(l => l.Split('\t')[0])
+                .OrderByDescending(p => p.Length)
+                .FirstOrDefault() ?? "";
+            var total = ServerPaths.RuntimeServerDir.Length + 1 + longest.Length;
+            var longPaths = Microsoft.Win32.Registry.GetValue(
+                @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem", "LongPathsEnabled", 0);
+            return $"{total} characters, Windows long paths {(Equals(longPaths, 1) ? "on" : "off")}, limit 260 when off";
+        }
+        catch { return "unknown"; }
+    }
+
+    /// <summary>Stops the web/backend processes that run from the working copy (not the database) so files can be replaced.</summary>
+    private void KillStrayWorkingProcesses()
+    {
+        StopProcess(ref _web, "web");
+        StopProcess(ref _backend, "backend");
+        KillRuntimeNodeProcesses();
+    }
+
+    private static void KillRuntimeNodeProcesses()
+    {
+        foreach (var proc in Process.GetProcessesByName("node"))
+        {
+            try
+            {
+                if (proc.MainModule?.FileName?.StartsWith(ServerPaths.RuntimeServerDir, StringComparison.OrdinalIgnoreCase) == true)
+                    proc.Kill(entireProcessTree: true);
+            }
+            catch { }
+        }
+    }
+
+    // --- Web app check ------------------------------------------------------
+
+    private static readonly Regex StaticAssetUrl = new(@"/_next/static/[^""'\\\s<>)]+", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Loads the login page like a browser would, then every script/style/font file it points at. Returns what
+    /// failed (empty = the web app can really serve itself).
+    /// </summary>
+    private async Task<List<string>> CheckWebAssetsAsync(CancellationToken ct)
+    {
+        var problems = new List<string>();
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        var baseUrl = $"http://127.0.0.1:{ServerPaths.WebPort}";
+        string html = "";
+        string? pageError = null;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                using var response = await client.GetAsync(baseUrl + "/login", ct);
+                if (response.IsSuccessStatusCode) { html = await response.Content.ReadAsStringAsync(ct); pageError = null; break; }
+                pageError = $"/login answered HTTP {(int)response.StatusCode}";
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                pageError = $"/login failed: {ex.Message}";
+            }
+            await Task.Delay(1000, ct);
+        }
+        if (pageError is not null) { problems.Add(pageError); return problems; }
+
+        var urls = StaticAssetUrl.Matches(html).Select(m => m.Value.Replace("&amp;", "&")).Distinct().Take(80).ToList();
+        if (urls.Count == 0) { problems.Add("/login has no script or style files to load"); return problems; }
+        var failures = new ConcurrentBag<string>();
+        await Parallel.ForEachAsync(urls, new ParallelOptions { MaxDegreeOfParallelism = 6, CancellationToken = ct }, async (url, innerCt) =>
+        {
+            try
+            {
+                using var response = await client.GetAsync(baseUrl + url, HttpCompletionOption.ResponseHeadersRead, innerCt);
+                if (!response.IsSuccessStatusCode) failures.Add($"HTTP {(int)response.StatusCode} {url}");
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !innerCt.IsCancellationRequested)
+            {
+                failures.Add($"{ex.Message} {url}");
+            }
+        });
+        problems.AddRange(failures);
+        LogStartup($"web check: /login and {urls.Count} files, {failures.Count} failed");
+        return problems;
+    }
+
+    /// <summary>
+    /// If the web app cannot serve its own page or files, hashes the whole working copy against the package,
+    /// restores whatever differs, restarts the web app and checks again. Throws <see cref="AppFilesException"/>
+    /// (with the web log's tail) if it still cannot - a clear message instead of a blank window.
+    /// </summary>
+    private async Task VerifyWebAppAsync(CancellationToken ct)
+    {
+        var problems = await CheckWebAssetsAsync(ct);
+        if (problems.Count == 0) return;
+        LogStartup($"web check FAILED: {string.Join(" | ", problems.Take(5))}");
+
+        Report("Repairing program files…");
+        KillStrayWorkingProcesses();
+        await RepairRuntimeAsync(deep: true, ct);
+        var healthUrl = $"http://127.0.0.1:{ServerPaths.WebPort}/api/health";
+        StartBackend();
+        StartWeb();
+        await WaitForHttpHealthAsync($"http://127.0.0.1:{ServerPaths.BackendPort}/api/health", TimeSpan.FromMinutes(10), _backend, "backend", ct);
+        await WaitForHttpHealthAsync(healthUrl, TimeSpan.FromMinutes(5), _web, "web", ct);
+
+        problems = await CheckWebAssetsAsync(ct);
+        if (problems.Count == 0) { LogStartup("web check: OK after repair"); return; }
+        LogStartup($"web check still FAILED after repair: {string.Join(" | ", problems.Take(5))}");
+        throw new AppFilesException(
+            "OrderRestro's web app starts but cannot show its pages:\n" +
+            string.Join("\n", problems.Take(5)) +
+            $"\n\n{LogTail(Path.Combine(ServerPaths.ServerLogDir, "web.log"), 12)}\n\n" +
+            $"Your restaurant data has not been touched. Details: {Path.Combine(ServerPaths.ServerLogDir, "startup.log")}");
+    }
+
+    private const string ManifestName = "runtime-manifest.tsv";
+
+    /// <summary>
+    /// Update path: the package ships runtime-manifest.tsv (path, size, sha1 of every file - written at build time by
+    /// finalize-server-payload.js). If the copy we already have has the previous version's manifest, only the files
+    /// whose hash changed are copied and files the new version no longer has are deleted - usually a few hundred
+    /// files of app code instead of the whole 800 MB runtime. Returns false when there is nothing to diff against
+    /// (first install, or a copy made by a version without a manifest); the caller then does a full copy.
+    /// </summary>
+    private async Task<bool> TrySyncChangedFilesAsync(CancellationToken ct)
+    {
+        var newManifestPath = Path.Combine(ServerPaths.InstallServerDir, ManifestName);
+        var oldManifestPath = Path.Combine(ServerPaths.RuntimeServerDir, ManifestName);
+        if (!File.Exists(newManifestPath) || !File.Exists(oldManifestPath) || !File.Exists(ServerPaths.NodeExePath)) return false;
+
+        Dictionary<string, string> newEntries, oldEntries;
+        try
+        {
+            newEntries = ReadManifest(newManifestPath);
+            oldEntries = ReadManifest(oldManifestPath);
+        }
+        catch (Exception ex)
+        {
+            LogStartup($"manifest unreadable, doing a full copy: {ex.Message}");
+            return false;
+        }
+        if (newEntries.Count == 0) return false;
+
+        var toCopy = newEntries
+            .Where(e => !oldEntries.TryGetValue(e.Key, out var oldSig) || oldSig != e.Value || !File.Exists(RuntimePath(e.Key)))
+            .Select(e => e.Key)
+            .ToList();
+        var toDelete = oldEntries.Keys.Where(k => !newEntries.ContainsKey(k)).ToList();
+        LogStartup($"incremental update: {toCopy.Count} changed/new files, {toDelete.Count} removed, {newEntries.Count - toCopy.Count} unchanged");
+
+        // Drop the old manifest first: if this is interrupted, the next start does a full copy instead of trusting a
+        // half-updated tree.
+        File.Delete(oldManifestPath);
+
+        var done = 0;
+        await Parallel.ForEachAsync(toCopy, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = ct }, async (relPath, innerCt) =>
+        {
+            var dst = RuntimePath(relPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+            for (var attempt = 0; ; attempt++)
+            {
+                try { File.Copy(InstallPath(relPath), dst, overwrite: true); break; }
+                catch (IOException) when (attempt < 3) { await Task.Delay(500, innerCt); }
+                catch (UnauthorizedAccessException) when (attempt < 3) { await Task.Delay(500, innerCt); }
+            }
+            var n = Interlocked.Increment(ref done);
+            if (n % 500 == 0) Report($"Updating… ({n} of {toCopy.Count} files)");
+        });
+        foreach (var relPath in toDelete)
+        {
+            try { File.Delete(RuntimePath(relPath)); } catch (Exception ex) { LogStartup($"could not delete old file {relPath}: {ex.Message}"); }
+        }
+        File.Copy(newManifestPath, oldManifestPath, overwrite: true);
+        return true;
+    }
+
+    private static Dictionary<string, string> ReadManifest(string path)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in File.ReadLines(path))
+        {
+            var parts = line.Split('\t');
+            if (parts.Length != 3) continue;
+            map[parts[0]] = parts[1] + ":" + parts[2];
+        }
+        return map;
+    }
+
+    private static string RuntimePath(string relPath) =>
+        Path.Combine(ServerPaths.RuntimeServerDir, relPath.Replace('/', Path.DirectorySeparatorChar));
+
+    private static string InstallPath(string relPath) =>
+        Path.Combine(ServerPaths.InstallServerDir, relPath.Replace('/', Path.DirectorySeparatorChar));
 
     // An old runtime copy may still have its own postgres/node running from
     // a previous launch; they hold file locks that block the re-copy.
@@ -188,15 +507,7 @@ internal sealed class ServerSupervisor : IDisposable
             }
         }
         catch (Exception ex) { LogStartup($"stale postgres stop failed (ignored): {ex.Message}"); }
-        foreach (var proc in Process.GetProcessesByName("node"))
-        {
-            try
-            {
-                if (proc.MainModule?.FileName?.StartsWith(ServerPaths.RuntimeServerDir, StringComparison.OrdinalIgnoreCase) == true)
-                    proc.Kill(entireProcessTree: true);
-            }
-            catch { }
-        }
+        KillRuntimeNodeProcesses();
     }
 
     // --- Postgres ---------------------------------------------------------
@@ -478,9 +789,68 @@ internal sealed class ServerSupervisor : IDisposable
 
     // --- Backend ------------------------------------------------------------
 
+    /// <summary>
+    /// True when every migration folder this build ships is already recorded as applied in _prisma_migrations. Asked
+    /// with psql (a native tool that answers in well under a second) instead of starting the Prisma CLI. Any doubt -
+    /// psql missing or failing, no table yet (first run), a pending or rolled-back migration - returns false, and the
+    /// real `prisma migrate deploy` runs exactly as before.
+    /// </summary>
+    private async Task<bool> AllMigrationsAppliedAsync(CancellationToken ct)
+    {
+        try
+        {
+            var migrationsDir = Path.Combine(ServerPaths.BackendWorkingDir, "prisma", "migrations");
+            var psql = Path.Combine(ServerPaths.PostgresBinDir, "psql.exe");
+            if (!Directory.Exists(migrationsDir) || !File.Exists(psql)) return false;
+            var shipped = Directory.GetDirectories(migrationsDir)
+                .Where(d => File.Exists(Path.Combine(d, "migration.sql")))
+                .Select(Path.GetFileName)
+                .ToList();
+            if (shipped.Count == 0) return false;
+
+            var (exit, stdout, _) = await WithTimeoutAsync(ct, TimeSpan.FromSeconds(20), "migration check", innerCt =>
+                RunToolCapturedAsync(
+                    psql,
+                    $"-h 127.0.0.1 -p {ServerPaths.PostgresPort} -U orderrestro -d orderrestro -X -A -t -c " +
+                    "\"select migration_name from _prisma_migrations where finished_at is not null and rolled_back_at is null\"",
+                    ServerPaths.PostgresBinDir,
+                    env: null,
+                    "migration-check",
+                    innerCt));
+            if (exit != 0) return false;
+            var applied = new HashSet<string>(
+                stdout.Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0), StringComparer.Ordinal);
+            var pending = shipped.Where(m => !applied.Contains(m!)).ToList();
+            if (pending.Count > 0) LogStartup($"migrations pending: {pending.Count} (first: {pending[0]})");
+            return pending.Count == 0;
+        }
+        catch (Exception ex)
+        {
+            LogStartup($"migration check failed, running migrate deploy: {ex.Message}");
+            return false;
+        }
+    }
+
+    // Node's on-disk compile cache (Node 22.1+): the second and later starts reuse the compiled bytecode of every
+    // module instead of parsing thousands of JS files again. Keyed by file content, so an update just adds entries.
+    private static void AddNodeCompileCache(Dictionary<string, string> env)
+    {
+        try
+        {
+            var dir = Path.Combine(ServerPaths.DataDir, "node-compile-cache");
+            Directory.CreateDirectory(dir);
+            env["NODE_COMPILE_CACHE"] = dir;
+        }
+        catch
+        {
+            // optional speed-up only
+        }
+    }
+
     private async Task RunMigrationsAsync(CancellationToken ct)
     {
         var env = ReadBackendEnv();
+        AddNodeCompileCache(env);
         var prismaCli = Path.Combine(ServerPaths.BackendWorkingDir, ServerPaths.BackendPrismaCliRelativePath);
         var exit = await WithTimeoutAsync(ct, TimeSpan.FromMinutes(2), "prisma migrate deploy", innerCt =>
             RunToolAsync(
@@ -499,6 +869,7 @@ internal sealed class ServerSupervisor : IDisposable
     private void StartBackend()
     {
         var env = ReadBackendEnv();
+        AddNodeCompileCache(env);
         var mainJs = Path.Combine(ServerPaths.BackendWorkingDir, ServerPaths.BackendMainJsRelativePath);
         _backend = StartLongRunning(ServerPaths.NodeExePath, $"\"{mainJs}\"", ServerPaths.BackendWorkingDir, env, "backend");
     }
@@ -512,6 +883,7 @@ internal sealed class ServerSupervisor : IDisposable
             // reach this port directly — that's the whole point.
             ["HOSTNAME"] = "0.0.0.0",
         };
+        AddNodeCompileCache(env);
         _web = StartLongRunning(ServerPaths.NodeExePath, $"\"{ServerPaths.WebServerScriptRelativePath}\"", ServerPaths.WebDir, env, "web");
     }
 
@@ -684,26 +1056,77 @@ internal sealed class ServerSupervisor : IDisposable
         return proc.ExitCode;
     }
 
-    private async Task WaitForHttpHealthAsync(string url, TimeSpan timeout, CancellationToken ct)
+    /// <summary>
+    /// Waits for the process's health URL. Ends at once, with the end of that process's own log, if the process exits
+    /// (a crash at boot used to be reported only after the whole wait, as a bare "did not become healthy", with the
+    /// real reason left in backend.log). While it is alive but slow, the status line says how long it has been.
+    /// </summary>
+    private async Task WaitForHttpHealthAsync(string url, TimeSpan timeout, Process? proc, string logName, CancellationToken ct)
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
-        var deadline = DateTime.UtcNow + timeout;
+        var started = DateTime.UtcNow;
+        var deadline = started + timeout;
         Exception? lastError = null;
+        var logPath = Path.Combine(ServerPaths.ServerLogDir, $"{logName}.log");
         while (DateTime.UtcNow < deadline)
         {
             ct.ThrowIfCancellationRequested();
+            if (proc is not null && HasExited(proc))
+            {
+                var code = SafeExitCode(proc);
+                LogStartup($"{logName} exited during start-up (exit {code})");
+                throw new InvalidOperationException(
+                    $"The {logName} stopped while starting (exit code {code}).\n\n{LogTail(logPath, 20)}\n\nFull log: {logPath}");
+            }
             try
             {
                 using var response = await client.GetAsync(url, ct);
                 if (response.IsSuccessStatusCode) return;
+                lastError = new HttpRequestException($"HTTP {(int)response.StatusCode}");
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 lastError = ex;
             }
+            var waited = (int)(DateTime.UtcNow - started).TotalSeconds;
+            if (waited >= 15 && waited % 5 < 1)
+            {
+                Report($"Starting the {logName}… ({waited}s - the first start after installing or updating takes longer)");
+            }
             await Task.Delay(500, ct);
         }
-        throw new TimeoutException($"{url} did not become healthy in time.", lastError);
+        LogStartup($"{logName} health check timed out after {timeout.TotalSeconds:0}s: {lastError?.Message}");
+        throw new TimeoutException(
+            $"{url} did not become healthy within {timeout.TotalMinutes:0} minutes ({lastError?.Message ?? "no answer"}).\n\n{LogTail(logPath, 20)}\n\nFull log: {logPath}",
+            lastError);
+    }
+
+    private static bool HasExited(Process p)
+    {
+        try { return p.HasExited; } catch { return false; }
+    }
+
+    private static string SafeExitCode(Process p)
+    {
+        try { return DescribeExitCode(p.ExitCode); } catch { return "unknown"; }
+    }
+
+    /// <summary>Last lines of a log that may still be open for writing by the process.</summary>
+    private static string LogTail(string path, int lines)
+    {
+        try
+        {
+            if (!File.Exists(path)) return "(no log was written)";
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(fs);
+            var all = reader.ReadToEnd().Split('\n').Select(l => l.TrimEnd('\r')).Where(l => l.Length > 0).ToArray();
+            if (all.Length == 0) return "(the log is empty)";
+            return "Last lines of the log:\n" + string.Join("\n", all.TakeLast(lines));
+        }
+        catch (Exception ex)
+        {
+            return $"(could not read {Path.GetFileName(path)}: {ex.Message})";
+        }
     }
 
     private void Report(string message) => StatusChanged?.Invoke(message);

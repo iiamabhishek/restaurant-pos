@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { Pencil, Trash2, Users } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "@/lib/toast";
@@ -22,6 +23,7 @@ export function EditableTableTile({
   branchId: string | null;
   onEdit: () => void;
 }) {
+  const { t } = useI18n();
   const updateLayout = useUpdateTableLayout(branchId);
   const deleteTable = useDeleteTable(branchId);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
@@ -64,16 +66,16 @@ export function EditableTableTile({
           rotation: table.rotation,
         },
       ],
-      { onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not save position") },
+      { onError: (err) => toast.error(err instanceof ApiError ? err.message : t("Could not save position")) },
     );
     setDragPos(null);
   };
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm(`Delete ${table.name ?? `Table ${table.number}`}?`)) return;
+    if (!confirm(t("Delete {value}?", { value: table.name ?? t("Table {number}", { number: table.number }) }))) return;
     deleteTable.mutate(table.id, {
-      onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not delete table"),
+      onError: (err) => toast.error(err instanceof ApiError ? err.message : t("Could not delete table")),
     });
   };
 

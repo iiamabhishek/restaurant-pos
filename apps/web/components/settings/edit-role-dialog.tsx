@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { PermissionChecklist } from "@/components/settings/permission-checklist";
@@ -27,6 +28,7 @@ export function EditRoleDialog({
   role: RoleWithPermissions;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   const [label, setLabel] = useState(role.label);
   const [permissionKeys, setPermissionKeys] = useState<string[]>(() =>
     role.permissions.map((p) => p.permission.key),
@@ -44,11 +46,11 @@ export function EditRoleDialog({
       { id: role.id, dto: { label: label.trim(), permissionKeys } },
       {
         onSuccess: () => {
-          toast.success(`${label.trim()} updated`);
+          toast.success(t("{trim} updated", { trim: label.trim() }));
           onClose();
         },
         onError: (err) =>
-          toast.error(err instanceof ApiError ? err.message : "Could not update role"),
+          toast.error(err instanceof ApiError ? err.message : t("Could not update role")),
       },
     );
   };
@@ -58,16 +60,16 @@ export function EditRoleDialog({
       <DialogContent className="sm:max-w-lg">
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>Edit role</DialogTitle>
+            <DialogTitle>{t("Edit role")}</DialogTitle>
           </DialogHeader>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="r-edit-name">Name</Label>
+            <Label htmlFor="r-edit-name">{t("Name")}</Label>
             <Input id="r-edit-name" value={role.name} disabled />
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label htmlFor="r-edit-label">Display label</Label>
+            <Label htmlFor="r-edit-label">{t("Display label")}</Label>
             <Input
               id="r-edit-label"
               value={label}
@@ -78,13 +80,13 @@ export function EditRoleDialog({
           </div>
 
           <div className="flex flex-col gap-2">
-            <Label>Permissions</Label>
+            <Label>{t("Permissions")}</Label>
             <PermissionChecklist selected={permissionKeys} onToggle={togglePermission} />
           </div>
 
           <DialogFooter>
             <Button type="submit" disabled={updateRole.isPending}>
-              {updateRole.isPending ? "Saving…" : "Save changes"}
+              {updateRole.isPending ? t("Saving…") : t("Save changes")}
             </Button>
           </DialogFooter>
         </form>

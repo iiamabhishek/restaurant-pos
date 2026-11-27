@@ -87,7 +87,7 @@ export type DeliveryZoneDto = z.infer<typeof deliveryZoneSchema>;
 export const deliveryZoneUpdateSchema = deliveryZoneSchema.partial();
 export type DeliveryZoneUpdateDto = z.infer<typeof deliveryZoneUpdateSchema>;
 
-export const assignDriverSchema = z.object({ driverId: z.string().min(1) });
+export const assignDriverSchema = z.object({ driverId: z.string().min(1), reason: z.string().max(200).optional() });
 export const deliveryStatusUpdateSchema = z.object({
   status: deliveryStatusSchema,
 });
@@ -114,9 +114,21 @@ export type AddOrderItemsDto = z.infer<typeof addOrderItemsSchema>;
 
 // Guest self-order from a table's QR code — no account, so a name is the
 // only way staff can tell whose order this is (shown on KDS/order lists).
+// Portions/custom prices are staff-only: the public menu never publishes
+// halfPrice, so a crafted HALF request would use an unpublished price point.
+export const publicCartItemSchema = cartItemSchema.omit({
+  portion: true,
+  customPrice: true,
+  customLabel: true,
+});
 export const publicOrderSchema = z.object({
   guestName: z.string().trim().min(1, "Please enter your name").max(60),
-  items: z.array(cartItemSchema).min(1),
+  items: z.array(publicCartItemSchema).min(1),
+  // How the guest will pay. Omitted = the older behaviour (no payment choice).
+  payment: z.enum(["CASH", "ONLINE"]).optional(),
+  // Made by the phone for this basket and reused on every retry, so a double tap or a dropped connection
+  // can never create a second order or add the same round twice.
+  idempotencyKey: z.string().trim().min(8).max(80).optional(),
 });
 export type PublicOrderDto = z.infer<typeof publicOrderSchema>;
 
@@ -217,6 +229,23 @@ export const mergeOrdersSchema = z.object({
   sourceOrderId: z.string(),
 });
 export type MergeOrdersDto = z.infer<typeof mergeOrdersSchema>;
+
+// Split one open bill into a new bill for some of its lines (one guest's share). A line can be split by
+// quantity: 2 of a 3-quantity line move and 1 stays.
+export const splitOrderSchema = z.object({
+  lines: z
+    .array(
+      z.object({
+        orderItemId: z.string().min(1),
+        quantity: z.coerce.number().int().positive().max(1000),
+      }),
+    )
+    .min(1)
+    .max(100),
+  // One per attempt: a double click or retry returns the bill the first call made instead of splitting again.
+  requestId: z.string().min(8).max(64),
+});
+export type SplitOrderDto = z.infer<typeof splitOrderSchema>;
 
 // Edit an open bill: move it to another table and/or fix header details.
 export const updateOrderSchema = z

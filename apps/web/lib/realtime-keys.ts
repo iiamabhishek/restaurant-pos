@@ -4,6 +4,8 @@
 // first terminal showing a stale or missing order for the table.
 export function realtimeInvalidations(event: string, branchId: string): string[][] {
   switch (event) {
+    case "menu.updated":
+      return [["menu", "items", branchId]];
     case "kot.created":
     case "kot.updated":
       return [["kds"], ["dashboard"], ["orders"]];
@@ -17,7 +19,10 @@ export function realtimeInvalidations(event: string, branchId: string): string[]
     case "order.deleted":
       // ["kds"]: incoming orders waiting to be accepted, and tickets that a
       // cancel/decline/payment changed, live on the kitchen screen too.
-      return [["dashboard"], ["floors", branchId], ["orders"], ["kds"]];
+      return [["dashboard"], ["floors", branchId], ["orders"], ["kds"], ["deliveries"], ["rider"]];
+    case "rider.assigned":
+    case "rider.unassigned":
+      return [["rider"], ["deliveries"]];
     case "reservation.created":
     case "reservation.updated":
       return [["reservations", branchId], ["dashboard"]];
@@ -27,6 +32,7 @@ export function realtimeInvalidations(event: string, branchId: string): string[]
 }
 
 export const REALTIME_EVENTS = [
+  "menu.updated",
   "kot.created",
   "kot.updated",
   "kot.reprinted",
@@ -37,4 +43,6 @@ export const REALTIME_EVENTS = [
   "order.deleted",
   "reservation.created",
   "reservation.updated",
+  "rider.assigned",
+  "rider.unassigned",
 ] as const;

@@ -94,7 +94,7 @@ pnpm install
 docker compose up -d postgres                               # just the DB
 cp apps/backend/.env.example apps/backend/.env               # point DATABASE_URL at your Postgres
 pnpm --filter @nodedr-restaurant/types build
-cd apps/backend && npx prisma migrate dev && npx ts-node prisma/seed.ts && cd ../..
+(cd apps/backend && pnpm exec prisma migrate dev && pnpm exec prisma db seed)
 pnpm dev   # runs backend (:4001) and web (:1995) together via Turborepo
 ```
 
@@ -106,10 +106,12 @@ pnpm typecheck
 pnpm build
 ```
 
-There is no CI workflow wired up yet (tracked in `PROJECT.md`/`ROADMAP.md`
-— a good first contribution if you want one) — until it lands, a green
-local `lint` + `typecheck` + `build` is the actual gate, so run all three
-before requesting review.
+CI is [`.github/workflows/ci.yml`](.github/workflows/ci.yml). It runs on every
+pull request and on pushes to `master`: dependency audit, shared-types build,
+Prisma migrate + seed, typecheck, lint (never autofixes), backend unit and
+e2e tests, a backend build with a runtime-dependency check, web unit tests and
+build, and the mobile/updater tests. A PR must be green there. Run `lint`,
+`typecheck` and `build` locally first to save a round trip.
 
 ## Project structure
 
@@ -187,6 +189,16 @@ on POS/KDS screens used under time pressure.
    repo's convention is to record deviations inline rather than let docs
    silently drift from the code.
 
+### Staff interface translations
+
+The language picker applies to dashboard pages and dialogs. Use `useI18n().t` for
+staff-facing labels. New staff messages use their English copy as the key, with matching
+entries in `apps/web/lib/i18n/staff/{es,fr,pt}.json`. Translate a whole message with named
+placeholders so each language can place the values naturally. For example,
+`t("Table {number}", { number: table.number })` displays the table number in each language.
+Use `useStaffFormat()` for displayed dates, amounts and predefined status or role labels.
+Keep customer-entered text, stored identifiers and form values in their original form.
+
 ## Commit messages
 
 Write for the *why*, not the *what* — the diff already shows what changed.
@@ -216,6 +228,12 @@ is more important than format. Keep the subject line under ~70 characters.
 - Expect review comments referencing the conventions above by name —
   that's not personal, it's the same bar every change (including the
   maintainer's own) gets held to.
+
+### How your pull request is handled
+
+- Pull requests are merged as you wrote them, so your commits and your name stay in the history. A maintainer will not copy your change into a new commit under another name.
+- If something needs to change before merging, the maintainer comments on the pull request, or pushes a fix to your branch (maintainer edits are on by default). You can always say no.
+- If a pull request is declined, it is closed with the reason in a comment.
 
 ## Reporting bugs
 

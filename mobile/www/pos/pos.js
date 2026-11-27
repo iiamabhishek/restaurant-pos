@@ -3,21 +3,48 @@
 // whenever it can. Plain DOM + modules: nothing here needs a build step.
 import { computeBill, round2, settle, upiLink } from './lib/bill.js';
 import { escposReceipt, htmlReceipt, toBase64 } from './lib/receipt.js';
-import { reservations, expenses, kots, kv, newId, nextKotNumber, nextLocalNumber, nextOrderNumber, orders, readEverything, refunds, replaceEverything, sales, saveKotWithOrder, shifts } from './lib/store.js';
-import { backupJson, buildExpense, buildRefund, closeDay, dayBooks, daysAgo, expensesCsv, parseBackup, rangeBooks, refundableLines, refundedTotal, salesCsv, today } from './lib/books.js';
+import { completeCheckout, events, reservations, expenses, kots, kv, newId, nextKotNumber, nextLocalNumber, nextOrderNumber, orders, readEverything, refunds, replaceEverything, sales, saveKotWithOrder, savePendingSale, shifts } from './lib/store.js';
+import { agingBuckets, backupJson, buildCollection, buildExpense, buildRefund, closeDay, dayBooks, daysAgo, dueOf, dueSales, expensesCsv, parseBackup, rangeBooks, refundableLines, refundedTotal, salesCsv, today } from './lib/books.js';
+import { planTables } from './lib/tables.js';
+import { pushKey } from './lib/scanburst.js';
+import { buildChoice, defaultPicks, findByCode, lineKey, needsChoice } from './lib/options.js';
+import { activePauseUntil, mergeMenuPauses, pausedAddition } from './lib/menu-pause.js';
+import { afterRight, afterWrong, hashPin, lockState, needsManager, pinTaken, validPin, weakPin, whoHasPin } from './lib/staff.js';
 import { KOT_NEXT, dayReport, kotDelta, markSent, minutesSince, newOrder, openOrders, saleNote, tableMap, tableTakenBy } from './lib/orders.js';
 import { escposKot, htmlKot } from './lib/kot.js';
 import { STATUS_LABEL, clashes, grouped, heldSoon, newBooking, setStatus } from './lib/reservations.js';
-import { native, pickServer, reachable, savedServers } from './lib/net.js';
-import { login, pullSnapshot, syncNow, retrySale } from './lib/sync.js';
+import { native, pickServer, reachable, request, savedServers, setDeviceId } from './lib/net.js';
+import { dismissEvent, queueEvent, retryEvent, shiftState } from './lib/journal.js';
+import { NO_RECIPES_FOR_PRODUCT, capsFrom, createInventoryItem, loadCosting, createMenuItem, deleteDraft, emptyForm, fillFromRecipe, formFromDraft, formProblem, friendlyError, loadRecipes, loadStockItems, postDraft, postNew, recipeProblem, saveDraft, saveRecipe, shortRows, voucherBody } from './lib/stockjournal.js';
+import { fetchMenuPauses, login, pullSnapshot, syncNow, retrySale } from './lib/sync.js';
 import { checkAll } from './lib/net.js';
-import { addSection, addTable, removeSection, removeTable, changeLocalPassword, checkLocalPassword, createLocalAccount, eraseLocalAccount, hasLocalAccount, remapSalesToServer, removeDish, setSoldOut, upsertDish, useStock } from './lib/local.js';
+import { createSession } from './lib/nearby.js';
+import { nearbyAcks, peerSales } from './lib/store.js';
+import { addOnsText, addSection, addTable, addTables, removeSection, removeTable, changeLocalPassword, checkLocalPassword, createLocalAccount, eraseLocalAccount, hasLocalAccount, remapSalesToServer, removeDish, setSoldOut, upsertDish, useStock } from './lib/local.js';
+
+// Guards shared across sheet instances: closing a sheet must not let a second
+// one start the same money action while the first await is still pending.
+const moneyGuards = new Map();
+const acquireMoneyGuard = (key) => {
+  if (moneyGuards.get(key)) return false;
+  moneyGuards.set(key, true);
+  return true;
+};
+const releaseMoneyGuard = (key) => moneyGuards.delete(key);
+function gatedSync(opts) {
+  if (syncGate) return; // connecting: don't send unmapped sales or overwrite them
+  return syncNow(opts).then((result) => afterSync(result, opts));
+}
+let checkoutInFlight = false;
+let connectInFlight = false;
+let syncGate = 0; // >0 while connecting: background sync must not touch sales
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const plugins = () => (window.Capacitor && window.Capacitor.Plugins) || {};
-const inr = (n) => `₹${Number(n).toFixed(2)}`;
+const inr = (n) => `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; // ₹1,050.00 / ₹1,25,000.00
 
+let SJ = null; // the open Stock journal form (see "stock journal" below); null when its sheet is closed
 const S = {
   view: 'sell',
   snap: null,
@@ -27,9 +54,13 @@ const S = {
   type: 'TAKEAWAY',
   table: '',
   discountPercent: 0,
+  discountReason: '',
   online: false,
   syncing: false,
   pending: 0,
+  pendingEvents: 0,
+  failedEvents: 0,
+  pendingBookings: 0,
   lastSync: null,
   note: null,
   unlocked: false,
@@ -39,6 +70,11 @@ const S = {
   editTables: false,
   tablesTab: 'floor', // 'floor' | 'bookings'
   showDone: false,
+  staff: [], // people who switch in with a PIN on this phone (kv 'staff'); empty = no PINs asked
+  who: null, // the person switched in right now
+  scPct: 0, // voluntary service charge offered, in % (0 = off)
+  serviceCharge: false, // the guest agreed to it on this order
+  customer: { name: '', phone: '' }, // who the bill is for (needed to leave it unpaid)
 };
 
 const ICON = {
@@ -49,6 +85,9 @@ const ICON = {
   menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>',
   sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18.5 2v4h-4M5.5 22v-4h4"/></svg>',
 };
+
+/** A phone account can do everything; a server-linked phone only what its server says it takes (see sync.js). */
+const can = (cap) => !!(S.snap && S.snap.local) || !!(S.caps && S.caps[cap]);
 
 function toast(msg, ms = 2600) {
   const t = $('toast');
@@ -77,7 +116,9 @@ const histBackIf = (test) =>
       }),
   );
 
+let checkPaymentPause;
 function openSheet(html, onMount) {
+  checkPaymentPause = undefined;
   const s = $('sheet');
   if (s.hidden) histPush({ sheet: true });
   s.innerHTML = `<div class="panel" role="dialog" aria-modal="true">${html}</div>`;
@@ -90,11 +131,13 @@ function openSheet(html, onMount) {
 }
 let booksDirty = false; // a books sheet changed something: redraw the screen behind it when it closes
 function closeSheet(fromBack = false) {
+  checkPaymentPause = undefined;
   const s = $('sheet');
   const wasOpen = !s.hidden;
   s.hidden = true;
   if (wasOpen && fromBack !== true) histBackIf((st) => st.sheet);
   s.innerHTML = '';
+  SJ = null;
   if (booksDirty) {
     booksDirty = false;
     if (S.snap) render();
@@ -102,13 +145,20 @@ function closeSheet(fromBack = false) {
 }
 
 // ------------------------------------------------------------------- state ---
+// The cart: line key (dish + portion + add-ons, see lib/options.js) -> { key, item, qty, sent, note, portion, mods, baseName }.
+// `item` is the line as sold: its name carries the portion and add-ons and its price includes them.
 const cartLines = () => [...S.cart.values()].filter((l) => l.qty > 0);
+const keyOf = (l) => l.key || lineKey(l.menuItemId, l.portion, (l.mods || []).map((m) => m.id));
+const qtyOf = (itemId) => [...S.cart.values()].filter((l) => l.item.id === itemId).reduce((n, l) => n + l.qty, 0);
 const billOf = (extra = {}) =>
   computeBill(
     cartLines().map((l) => ({ price: l.item.price, quantity: l.qty, taxRate: l.item.taxRate })),
-    { taxMode: S.snap.branch.taxMode, discountPercent: S.discountPercent, ...extra },
+    { taxMode: S.snap.branch.taxMode, discountPercent: S.discountPercent, serviceChargePct: S.serviceCharge && can('offlineOptions') ? S.scPct : 0, ...extra },
   );
 const cartCount = () => cartLines().reduce((n, l) => n + l.qty, 0);
+
+/** What identifies "the same cart, same money" so an interrupted checkout can be resumed instead of repeated. */
+const checkoutSig = (sale) => JSON.stringify([sale.bill.total, (sale.items || []).map((i) => [i.menuItemId, i.quantity])]);
 
 function saleFrom(localNumber, bill, payments, change) {
   return {
@@ -117,11 +167,24 @@ function saleFrom(localNumber, bill, payments, change) {
     soldAt: new Date().toISOString(),
     type: S.type,
     tableLabel: S.type === 'DINE_IN' ? S.table || '' : '',
-    items: cartLines().map((l) => ({ menuItemId: l.item.id, name: l.item.name, price: l.item.price, taxRate: l.item.taxRate, quantity: l.qty, ...(l.note ? { note: l.note } : {}) })),
+    items: cartLines().map((l) => ({
+      menuItemId: l.item.id,
+      name: l.item.name,
+      baseName: l.baseName || l.item.name,
+      price: l.item.price,
+      taxRate: l.item.taxRate,
+      quantity: l.qty,
+      ...(l.note ? { note: l.note } : {}),
+      ...(l.portion ? { portion: l.portion } : {}),
+      ...(l.mods && l.mods.length ? { modifierIds: l.mods.map((m) => m.id), mods: l.mods } : {}),
+    })),
     orderId: S.orderId || undefined,
+    ...(S.customer.phone || S.customer.name ? { customer: { name: S.customer.name.trim(), phone: S.customer.phone.trim() } } : {}),
+    ...(S.who ? { staffId: S.who.id, staffName: S.who.name, ...(S.who.serverId ? { staffServerId: S.who.serverId } : {}) } : {}),
     discountPercent: S.discountPercent || 0,
+    discountReason: S.discountPercent > 0 ? S.discountReason.trim() : '',
     taxMode: S.snap.branch.taxMode || 'INCLUSIVE',
-    bill: { subtotal: bill.subtotal, discountAmount: bill.discountAmount, tax: bill.tax, total: bill.total },
+    bill: { subtotal: bill.subtotal, discountAmount: bill.discountAmount, serviceCharge: bill.serviceCharge || 0, tax: bill.tax, total: bill.total },
     payments,
     change,
     status: 'pending',
@@ -159,8 +222,11 @@ async function persistOrder() {
   o.type = S.type;
   o.tableLabel = S.type === 'DINE_IN' ? S.table || '' : '';
   o.discountPercent = S.discountPercent || 0;
+  o.discountReason = S.discountReason || '';
+  o.serviceCharge = !!S.serviceCharge;
+  o.customer = S.customer.name || S.customer.phone ? { ...S.customer } : undefined;
   o.updatedAt = new Date().toISOString();
-  o.items = lines.map((l) => ({ menuItemId: l.item.id, name: l.item.name, price: l.item.price, taxRate: l.item.taxRate, qty: l.qty, sent: l.sent || 0, note: l.note || '' }));
+  o.items = lines.map((l) => ({ key: keyOf({ ...l, menuItemId: l.item.id }), menuItemId: l.item.id, name: l.item.name, baseName: l.baseName || l.item.name, price: l.item.price, taxRate: l.item.taxRate, qty: l.qty, sent: l.sent || 0, note: l.note || '', ...(l.portion ? { portion: l.portion } : {}), ...(l.mods && l.mods.length ? { mods: l.mods } : {}) }));
   await orders.put(o);
   await kv.set('currentOrderId', o.id);
 }
@@ -168,17 +234,28 @@ function resetCart() {
   S.cart = new Map();
   S.orderId = null;
   S.discountPercent = 0;
+  S.discountReason = '';
   S.table = '';
   S.type = 'TAKEAWAY';
   S.noteOpen = null;
+  S.serviceCharge = false;
+  S.customer = { name: '', phone: '' };
   kv.del('currentOrderId');
 }
 function loadOrder(o) {
-  S.cart = new Map(o.items.map((l) => [l.menuItemId, { item: { id: l.menuItemId, name: l.name, price: l.price, taxRate: l.taxRate, sellOffline: true }, qty: l.qty, sent: l.sent || 0, note: l.note || '' }]));
+  S.cart = new Map(
+    o.items.map((l) => {
+      const key = keyOf(l);
+      return [key, { key, item: { id: l.menuItemId, name: l.name, price: l.price, taxRate: l.taxRate, sellOffline: true }, baseName: l.baseName || l.name, qty: l.qty, sent: l.sent || 0, note: l.note || '', portion: l.portion, mods: l.mods || [] }];
+    }),
+  );
   S.orderId = o.id;
+  S.serviceCharge = !!o.serviceCharge;
+  S.customer = o.customer ? { name: o.customer.name || '', phone: o.customer.phone || '' } : { name: '', phone: '' };
   S.type = o.type;
   S.table = o.tableLabel || '';
   S.discountPercent = o.discountPercent || 0;
+  S.discountReason = o.discountReason || '';
   kv.set('currentOrderId', o.id);
 }
 async function restoreCurrent() {
@@ -191,7 +268,7 @@ async function restoreCurrent() {
 const orderBill = (o) =>
   computeBill(
     o.items.filter((l) => l.qty > 0).map((l) => ({ price: l.price, quantity: l.qty, taxRate: l.taxRate })),
-    { taxMode: S.snap.branch.taxMode, discountPercent: o.discountPercent || 0 },
+    { taxMode: S.snap.branch.taxMode, discountPercent: o.discountPercent || 0, serviceChargePct: o.serviceCharge && can('offlineOptions') ? S.scPct : 0 },
   );
 
 /** Move to another order (or a fresh one), keeping the current one saved. */
@@ -245,6 +322,8 @@ async function sendToKitchen(mode = 'bt') {
   if (!S.orderId) return toast('Add something to the order first.');
   const o = await orders.get(S.orderId);
   const d = kotDelta(o);
+  const paused = pausedAddition(S.snap.items, S.cart.values());
+  if (paused) return toast(`${paused.name}: ${pauseLabel(paused)}. Remove the unsent quantity to continue.`);
   if (d.empty) return toast('Everything on this order is already on a KOT. Use Reprint to print the last one again.');
   const tables = S.snap.floors.flatMap((f) => f.tables);
   if (o.type === 'DINE_IN' && tables.length && !o.tableLabel) return toast('Choose the table first.');
@@ -283,6 +362,7 @@ function cancelOrderSheet() {
       const sentTo = o && (o.kotNumbers || []).length;
       p.querySelector('#kw').textContent = sentTo ? `KOT ${o.kotNumbers.join(', ')} was already printed. Tell the kitchen to stop.` : 'No KOT was printed. The order is kept as a record, not deleted.';
       p.querySelector('#yes').onclick = async () => {
+        if (sentTo && !(await managerOK(`Cancel order ${o.number}: the kitchen already has KOT ${o.kotNumbers.join(', ')}.`))) return;
         if (o) {
           o.status = 'VOID';
           o.voidReason = p.querySelector('#cr').value;
@@ -390,32 +470,17 @@ const printActions = (sale, provisional) => `
     <button class="btn ghost" data-pr="pdf">Print / Save PDF</button>
   </div>`;
 function bindPrint(root, sale, provisional) {
+  const upi = () => provisional && !pausedAddition(S.snap.items, S.cart.values()) ? upiUriFor(sale) : null;
   root.querySelector('[data-pr=bt]')?.addEventListener('click', () =>
-    printBluetooth(escposReceipt(sale, S.snap, { provisional, upiUri: provisional ? upiUriFor(sale) : null })),
+    printBluetooth(escposReceipt(sale, S.snap, { provisional, upiUri: upi() })),
   );
-  root.querySelector('[data-pr=pdf]')?.addEventListener('click', () => printPdf(sale, { provisional, upiUri: provisional ? upiUriFor(sale) : null }));
+  root.querySelector('[data-pr=pdf]')?.addEventListener('click', () => printPdf(sale, { provisional, upiUri: upi() }));
 }
 
 // -------------------------------------------------------------- sign in ----
-function renderWelcome() {
-  $('app').innerHTML = `
-  <div class="login" id="welcome">
-    <img src="../assets/logo.png" alt="">
-    <h1 class="center">Welcome to OrderRestro</h1>
-    <p class="mute center">How do you want to start? You can change your mind later: nothing you do now is lost.</p>
-    <button class="btn block mt" id="w-phone" type="button">Start on this phone<br><small>Best if you have no server yet. Takes about a minute.</small></button>
-    <ul class="mute" style="margin:.5rem 0 1rem;padding-left:1.1rem">
-      <li>Menu, tables, bookings, KOT printing and sales all work with no internet.</li>
-      <li>Connect a server whenever you are ready: your sales and bookings are sent to it and the menu comes back.</li>
-    </ul>
-    <button class="btn line block" id="w-server" type="button">I already have a restaurant server<br><small>Sign in and download your menu.</small></button>
-  </div>`;
-  $('w-phone').onclick = () => renderSetup();
-  $('w-server').onclick = () => renderLogin();
-}
-
 async function renderLogin(message) {
-  if (!message && !(await hasLocalAccount()) && !(await savedServers()).length && !S.fromWelcome) return ((S.fromWelcome = true), renderWelcome());
+  // The connect screen already asked server-or-phone. A brand-new phone that got here has chosen "this phone": go straight to creating the account.
+  if (!message && !(await hasLocalAccount()) && !(await savedServers()).length && !S.fromWelcome) return ((S.fromWelcome = true), renderSetup());
   S.fromWelcome = true;
   const servers = await savedServers();
   const last = (await kv.get('serverBase')) || servers[0] || '';
@@ -524,6 +589,8 @@ function renderUnlock(message) {
     ev.preventDefault();
     if (!(await checkLocalPassword($('p').value))) return renderUnlock('That password is not right.');
     S.unlocked = true;
+    // The owner password opens the phone as the owner: a manager for approvals.
+    if (staffOn()) S.who = { id: 'owner', name: (S.snap && S.snap.user && S.snap.user.name) || 'Owner', manager: true };
     S.snap = await kv.get('snapshot');
     if (!S.snap) return renderLogin();
     render();
@@ -563,12 +630,30 @@ function dishSheet(item, message) {
        <label for="dst">Stock <span class="mute">(optional)</span></label><input id="dst" type="number" inputmode="numeric" min="0" step="1" value="${item && item.stock != null ? esc(item.stock) : ''}" placeholder="Leave empty to not count">
        <small class="mute">With a number, each sale takes one off and the dish switches itself off at 0.</small>
        <label class="chk"><input id="dso" type="checkbox" ${item && item.soldOut ? 'checked' : ''}> Sold out for now</label>
+       <label for="dh">Half portion price (₹) <span class="mute">(optional)</span></label><input id="dh" type="number" inputmode="decimal" min="0" step="0.01" value="${item && item.halfPrice != null ? esc(item.halfPrice) : ''}" placeholder="Leave empty if there is no half">
+       <label for="dad">Add-ons <span class="mute">(optional, one per line: Extra cheese = 30)</span></label><textarea id="dad" rows="3" placeholder="Extra cheese = 30&#10;No onion">${esc(addOnsText(item))}</textarea>
+       <label for="dbc">Barcode <span class="mute">(optional, for scanning)</span></label><div class="searchrow"><input id="dbc" inputmode="numeric" value="${esc((item && item.barcode) || '')}" autocomplete="off">${plugins().BarcodeScanner ? '<button class="btn ghost" id="dbcs" type="button">Scan</button>' : ''}</div>
      </div>
      <footer>${item ? '<button class="btn line" id="dd">Delete</button>' : ''}<button class="btn" id="ds">Save</button></footer>`,
     (p) => {
+      const dbcs = p.querySelector('#dbcs');
+      if (dbcs)
+        dbcs.onclick = async () => {
+          try {
+            const sc = plugins().BarcodeScanner;
+            const perm = await sc.requestPermissions();
+            if (perm.camera !== 'granted' && perm.camera !== 'limited') return toast('The camera is needed to scan. Type the code instead.');
+            const r = await sc.scan({});
+            const code = r.barcodes && r.barcodes[0] && r.barcodes[0].rawValue;
+            if (code) $('dbc').value = code;
+          } catch {
+            /* cancelled */
+          }
+        };
       p.querySelector('#ds').onclick = async () => {
         try {
-          S.snap = await upsertDish(S.snap, { id: item && item.id, name: $('dn').value, price: $('dpr').value, taxRate: $('dt').value, isVeg: $('dv').checked, categoryName: $('dc').value, stock: $('dst').value, soldOut: $('dso').checked && !(item && item.stock === 0 && Number($('dst').value) > 0) });
+          if (!(await managerOK(item ? `Change ${item.name} on the menu.` : 'Add a dish to the menu.'))) return;
+          S.snap = await upsertDish(S.snap, { id: item && item.id, name: $('dn').value, price: $('dpr').value, taxRate: $('dt').value, isVeg: $('dv').checked, categoryName: $('dc').value, stock: $('dst').value, soldOut: $('dso').checked && !(item && item.stock === 0 && Number($('dst').value) > 0), halfPrice: $('dh').value, barcode: $('dbc').value, addOns: $('dad').value });
           closeSheet();
           S.note = null;
           render();
@@ -580,8 +665,9 @@ function dishSheet(item, message) {
       if (del)
         del.onclick = async () => {
           if (!confirm(`Delete ${item.name} from the menu? Past sales keep it.`)) return;
+          if (!(await managerOK(`Delete ${item.name} from the menu.`))) return;
           S.snap = await removeDish(S.snap, item.id);
-          S.cart.delete(item.id);
+          for (const [k, l] of S.cart) if (l.item.id === item.id) S.cart.delete(k);
           closeSheet();
           render();
         };
@@ -629,14 +715,31 @@ function connectSheet(message) {
     (p) => {
       p.querySelector('#cf').onsubmit = async (ev) => {
         ev.preventDefault();
+        if (connectInFlight) return; // an older attempt still owns the connection
+        connectInFlight = true;
         const b = p.querySelector('#cg');
         b.disabled = true;
         b.textContent = 'Connecting…';
         let base = $('cs').value.trim();
         if (base && !/^https?:\/\//i.test(base)) base = (/^[\d.]+(:\d+)?$/.test(base) ? 'http://' : 'https://') + base;
+        let hadBase, hadCaps, hadBranch, keep;
+        try {
+          // Capture everything before login writes anything. A failed read
+          // must not leave the form stuck on "Connecting…".
+          [hadBase, hadCaps, hadBranch, keep] = await Promise.all([
+            kv.get('serverBase'), kv.get('serverCaps'), kv.get('branchId'), kv.get('snapshot'),
+          ]);
+        } catch (e) {
+          connectInFlight = false;
+          b.disabled = false;
+          b.textContent = 'Connect and send my sales';
+          toast(`Could not read the saved settings: ${e.message}`, 4500);
+          return;
+        }
+        syncGate++; // no background sync until we know whether this attempt stuck
+        let restoreFailed = false;
         try {
           if (!base || !(await reachable(base))) throw new Error("Can't reach that server from here. Check the address and that you are online.");
-          const keep = await kv.get('snapshot');
           await login(base, $('ci').value.trim(), $('cp').value);
           const server = await pullSnapshot(base); // replaces the local menu
           const r = await remapSalesToServer(server.items);
@@ -646,12 +749,28 @@ function connectSheet(message) {
           S.view = 'sync';
           S.note = { text: `Connected. ${r.matched} sale${r.matched === 1 ? '' : 's'} ready to send${r.unmatched ? `, ${r.unmatched} with dishes the server does not have (see Sales)` : ''}.` };
           render();
-          syncNow().then(afterSync);
         } catch (e) {
-          await kv.set('snapshot', S.snap); // keep working on this phone
-          await kv.set('branchId', 'local');
-          connectSheet(e.message);
+          let message = e.message;
+          try {
+            // Restore the exact pre-connect snapshot, not one a background
+            // sync might have written while login() was in flight.
+            await kv.set('snapshot', keep);
+            S.snap = keep;
+            await kv.set('branchId', hadBranch || 'local');
+            if (hadBase === undefined) await kv.del('serverBase');
+            else await kv.set('serverBase', hadBase);
+            if (hadCaps === undefined) await kv.del('serverCaps');
+            else await kv.set('serverCaps', hadCaps);
+          } catch (restoreErr) {
+            restoreFailed = true;
+            message = `${message} Restoring the previous settings also failed (${restoreErr.message}). Reconnect to clear this.`;
+          }
+          connectSheet(message);
+        } finally {
+          syncGate--;
+          connectInFlight = false;
         }
+        if (!restoreFailed) gatedSync();
       };
     },
   );
@@ -663,20 +782,24 @@ function shell() {
     ['sell', 'Sell', ICON.sell],
     ['tables', 'Tables', ICON.tables],
     ...(S.snap.local ? [['menu', 'Menu', ICON.menu]] : []),
+    ...(!S.snap.local ? [['shift', 'Shift', ICON.sync]] : []),
+    ...(kitchenOn() ? [['kitchen', 'Kitchen', ICON.menu || ICON.sales]] : []),
     ['sales', 'Sales', ICON.sales],
     ['sync', 'Sync', ICON.sync],
   ];
   $('app').innerHTML = `
   <header class="top">
     <h1>${esc(S.snap.branch.name)}</h1>
+    ${S.who ? `<button class="who" id="who" type="button" aria-label="${esc(S.who.name)} is using this phone. Switch user">${esc(S.who.name)}</button>` : ''}
     <span class="pill ${S.snap.local || S.online ? 'on' : 'off'}" id="pill"><i></i>${S.snap.local ? 'On this phone' : S.online ? 'Online' : 'Offline'}</span>
   </header>
   <main class="view" id="view"></main>
   <div id="barwrap"></div>
   <nav class="nav" aria-label="Sections">
-    ${tabs.map(([k, label, icon]) => `<button data-tab="${k}" ${S.view === k ? 'aria-current="page"' : ''}>${icon}<span>${label}${k === 'sales' && S.pending ? ` <span class="badge">${S.pending}</span>` : ''}</span></button>`).join('')}
+    ${tabs.map(([k, label, icon]) => `<button data-tab="${k}" ${S.view === k ? 'aria-current="page"' : ''}>${icon}<span>${label}${k === 'sales' && S.pending ? ` <span class="badge">${S.pending}</span>` : ''}${k === 'kitchen' && S.pendingEvents + S.failedEvents ? ` <span class="badge">${S.pendingEvents + S.failedEvents}</span>` : ''}${k === 'sync' && S.failedBooks ? ` <span class="badge">${S.failedBooks}</span>` : ''}</span></button>`).join('')}
   </nav>`;
   document.querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => go(b.dataset.tab)));
+  if ($('who')) $('who').onclick = switchUser;
 }
 // Back button, like any phone app: close the open sheet first, then go back to Sell, then leave the app.
 // History: [guard] [root = Sell] [one entry while another tab is open] (+ one while a sheet is open).
@@ -719,15 +842,236 @@ async function refreshBadges() {
 }
 async function refreshPending() {
   S.pending = (await sales.pending()).length;
+  // Kitchen records (and attendance) and table bookings also wait for the server; the phone must say so.
+  const all = await events.all();
+  const kitchenEv = all.filter((e) => !BOOK_KIND[e.kind]);
+  S.pendingEvents = kitchenEv.filter((e) => e.status === 'pending').length;
+  S.failedEvents = kitchenEv.filter((e) => e.status === 'failed').length;
+  S.pendingBooks = all.filter((e) => BOOK_KIND[e.kind] && e.status === 'pending').length;
+  S.failedBooks = all.filter((e) => BOOK_KIND[e.kind] && e.status === 'failed').length;
+  S.pendingBookings = (await reservations.all()).filter((b) => b.dirty).length;
 }
+const waitingText = () => [S.pending && `${S.pending} sale${S.pending === 1 ? '' : 's'}`, S.pendingEvents && `${S.pendingEvents} kitchen/shift record${S.pendingEvents === 1 ? '' : 's'}`, S.pendingBookings && `${S.pendingBookings} booking${S.pendingBookings === 1 ? '' : 's'}`, S.pendingBooks && `${S.pendingBooks} refund/expense/cash record${S.pendingBooks === 1 ? '' : 's'}`].filter(Boolean).join(', ') || 'Nothing';
 async function render() {
   if (!S.snap) return renderLogin();
+  // With staff set up, a PIN switches someone in (and opens a phone account); the owner password still works.
+  if (staffOn() && !S.who && !(S.snap.local && S.unlocked && S.ownerUnlock)) return renderPinLock();
   if (S.snap.local && !S.unlocked) return renderUnlock();
   if (!S.restored) await restoreCurrent();
   await refreshPending();
   await refreshBadges();
   shell();
-  ({ sell: viewSell, tables: viewTables, menu: viewMenu, sales: viewSales, sync: viewSync })[S.view]();
+  ({ sell: viewSell, tables: viewTables, menu: viewMenu, sales: viewSales, sync: viewSync, kitchen: viewKitchen, shift: viewShift })[S.view]();
+}
+
+// ------------------------------------------------------------------- staff ---
+// A shared phone: each person switches in with their own PIN (kept as a salted hash, never sent anywhere). With
+// nobody set up, nothing here is asked: the phone behaves as before.
+const staffOn = () => S.staff.some((p) => p.active !== false);
+async function loadStaff() {
+  S.staff = (await kv.get('staff')) || [];
+  S.scPct = Number(await kv.get('serviceChargePct')) || 0;
+  S.caps = (await kv.get('serverCaps')) || {};
+  S.autoLockMin = Number(await kv.get('autoLockMin')) || 0;
+  if (S.who && !S.staff.some((p) => p.id === S.who.id && p.active !== false)) S.who = null;
+}
+async function saveStaff() {
+  await kv.set('staff', S.staff);
+}
+
+/** A PIN pad in its own layer, on top of any open sheet. Resolves with the person whose PIN it is, or null. */
+function pinPrompt({ title, hint = '', managerOnly = false }) {
+  return new Promise((resolve) => {
+    const box = document.createElement('div');
+    box.className = 'pinlayer';
+    box.innerHTML = `<form class="panel" role="dialog" aria-modal="true" aria-labelledby="pin-t" novalidate>
+      <header><h2 id="pin-t">${esc(title)}</h2><button type="button" class="x" data-x aria-label="Cancel">&times;</button></header>
+      <div class="body">${hint ? `<p class="mute">${esc(hint)}</p>` : ''}
+        <label for="pin-in">PIN</label><input id="pin-in" type="password" inputmode="numeric" autocomplete="off" maxlength="8" pattern="[0-9]*">
+        <p class="note bad" id="pin-err" role="alert" hidden></p></div>
+      <footer><button class="btn block" type="submit">OK</button></footer></form>`;
+    document.body.appendChild(box);
+    const input = box.querySelector('#pin-in');
+    const err = box.querySelector('#pin-err');
+    const done = (who) => (box.remove(), resolve(who));
+    box.querySelector('[data-x]').onclick = () => done(null);
+    box.onclick = (e) => {
+      if (e.target === box) done(null);
+    };
+    setTimeout(() => input.focus(), 30);
+    box.querySelector('form').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const lock = lockState(await kv.get('pinTries'));
+      const say = (t) => ((err.textContent = t), (err.hidden = false), (input.value = ''), input.focus());
+      if (lock.locked) return say(`Too many wrong PINs. Try again in ${lock.waitSeconds} s.`);
+      const who = await whoHasPin(S.staff, input.value);
+      if (!who || (managerOnly && !who.manager)) {
+        await kv.set('pinTries', afterWrong(await kv.get('pinTries')));
+        return say(who ? `${who.name} is not a manager. A manager has to enter their PIN.` : 'That PIN is not right.');
+      }
+      await kv.set('pinTries', afterRight());
+      done(who);
+    };
+  });
+}
+
+/** For things a cashier may not do alone: true straight away for a manager (or with no staff set up), else asks one. */
+async function managerOK(why) {
+  if (!needsManager(S.staff, S.who)) return true;
+  if (document.querySelector('.pinlayer')) return false; // one approval at a time
+  const m = await pinPrompt({ title: 'Manager approval', hint: why, managerOnly: true });
+  if (m) toast(`Approved by ${m.name}`);
+  return !!m;
+}
+
+/** Full-screen lock: someone has to switch in before the phone can be used. */
+function renderPinLock(message) {
+  $('app').innerHTML = `
+  <form class="login" id="pl" novalidate>
+    <img src="../assets/logo.png" alt="">
+    <h1 class="center">Who is using this phone?</h1>
+    <p class="mute center">Enter your PIN.</p>
+    ${message ? `<div class="note bad" role="alert">${esc(message)}</div>` : ''}
+    <label for="pin">PIN</label>
+    <input id="pin" type="password" inputmode="numeric" autocomplete="off" maxlength="8" pattern="[0-9]*" autofocus>
+    <button class="btn block mt" type="submit">Switch in</button>
+    ${S.snap && S.snap.local ? '<p class="center mt"><a href="#" id="owner" class="mute">Use the owner password instead</a></p>' : ''}
+  </form>`;
+  setTimeout(() => $('pin') && $('pin').focus(), 30);
+  if ($('owner')) $('owner').onclick = (e) => (e.preventDefault(), (S.ownerUnlock = true), renderUnlock());
+  $('pl').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const lock = lockState(await kv.get('pinTries'));
+    if (lock.locked) return renderPinLock(`Too many wrong PINs. Try again in ${lock.waitSeconds} s.`);
+    const who = await whoHasPin(S.staff, $('pin').value);
+    if (!who) {
+      await kv.set('pinTries', afterWrong(await kv.get('pinTries')));
+      return renderPinLock('That PIN is not right.');
+    }
+    await kv.set('pinTries', afterRight());
+    S.who = { id: who.id, name: who.name, manager: !!who.manager, serverId: who.serverId };
+    S.unlocked = true;
+    S.lastTouch = Date.now();
+    S.note = { text: `Hello ${who.name}.` };
+    render();
+  };
+}
+
+async function switchUser() {
+  await flushPersist();
+  S.who = null;
+  S.cart = new Map();
+  S.orderId = null;
+  S.restored = false;
+  closeSheet();
+  render();
+}
+
+// Idle lock: with staff set up and an auto-lock time chosen, the phone asks for a PIN again after that long untouched.
+S.lastTouch = Date.now();
+['pointerdown', 'keydown'].forEach((t) => document.addEventListener(t, () => (S.lastTouch = Date.now()), { capture: true, passive: true }));
+setInterval(() => {
+  if (S.who && staffOn() && S.autoLockMin > 0 && Date.now() - S.lastTouch > S.autoLockMin * 60000 && !document.querySelector('.pinlayer')) switchUser();
+}, 20000);
+
+/** Staff and their PINs. Server-linked phones list the server's staff; a phone account adds its own people. */
+async function staffSheet(message) {
+  if (staffOn() && !(await managerOK('Only a manager can change staff and PINs.'))) return;
+  const server = !S.snap.local ? S.snap.staff || [] : [];
+  // Server staff without a PIN yet are listed so a manager can give them one.
+  const rows = [...S.staff, ...server.filter((u) => !S.staff.some((p) => p.serverId === u.id)).map((u) => ({ id: `srv-${u.id}`, serverId: u.id, name: u.name, manager: !!u.manager, role: u.role, nopin: true }))].sort((a, b) => Number(!!b.manager) - Number(!!a.manager)); // managers first: the first PIN must be one
+  openSheet(
+    `${head('Staff & PINs')}
+     <div class="body">
+       ${message ? `<div class="note ${message.kind || ''}" role="status">${esc(message.text)}</div>` : ''}
+       <p class="mute">Each person switches in with their own PIN, so every bill shows who took it. Discounts, refunds, cancelling sent dishes, cash and menu changes then need a manager's PIN.${S.snap.local ? '' : ' Names and roles come from the server; PINs stay on this phone.'}</p>
+       ${rows.length ? rows.map((p) => `<div class="row"><div class="grow"><b>${esc(p.name)}</b><br><small>${p.manager ? 'Manager' : 'Staff'}${p.role ? ` &middot; ${esc(p.role)}` : ''}${p.nopin ? ' &middot; no PIN yet' : p.active === false ? ' &middot; switched off' : ''}</small></div><button class="btn line" data-p="${esc(p.id)}" style="min-height:40px">${p.nopin ? 'Set PIN' : 'Change'}</button></div>`).join('') : '<p class="mute center">Nobody yet.</p>'}
+       ${S.snap.local ? '<button class="btn block mt" id="addp">Add a person</button>' : ''}
+       ${staffOn() ? '<label for="al" class="mt">Lock when not used for</label><select id="al"><option value="0">Never</option><option value="2">2 minutes</option><option value="5">5 minutes</option><option value="15">15 minutes</option></select>' : ''}
+     </div>`,
+    (p) => {
+      if (p.querySelector('#al')) {
+        p.querySelector('#al').value = String(S.autoLockMin || 0);
+        p.querySelector('#al').onchange = async (e) => ((S.autoLockMin = Number(e.target.value)), await kv.set('autoLockMin', S.autoLockMin));
+      }
+      if (p.querySelector('#addp')) p.querySelector('#addp').onclick = () => personSheet(null);
+      p.querySelectorAll('[data-p]').forEach((b) => (b.onclick = () => personSheet(rows.find((r) => r.id === b.dataset.p))));
+    },
+  );
+}
+
+function personSheet(person, message, draft = {}) {
+  const isNew = !person || person.nopin;
+  const firstOne = !staffOn();
+  // After a refused save the form comes back with what was typed (never the PIN itself).
+  const draftName = draft.name ?? (person ? person.name : '');
+  const draftMgr = draft.manager ?? (person ? !!person.manager : firstOne);
+  const fromServer = person && person.serverId;
+  openSheet(
+    `${head(person && !person.nopin ? `Edit ${person.name}` : person ? `PIN for ${person.name}` : 'Add a person')}
+     <form class="body" id="pf" novalidate>
+       ${message ? `<div class="note bad" role="alert">${esc(message)}</div>` : ''}
+       ${fromServer ? `<p><b>${esc(person.name)}</b> &middot; ${person.manager ? 'Manager' : 'Staff'} <small class="mute">(from the server)</small></p>` : `<label for="pn">Name</label><input id="pn" value="${esc(draftName)}" maxlength="40" autocomplete="off">
+       <label>Role</label><div class="seg" role="group" aria-label="Role"><button type="button" data-r="staff" aria-pressed="${!draftMgr}" ${firstOne && isNew ? 'disabled' : ''}>Staff</button><button type="button" data-r="manager" aria-pressed="${!!draftMgr}">Manager</button></div>
+       ${firstOne && isNew ? '<small class="mute">The first person is a manager, so someone can always approve.</small>' : ''}`}
+       <label for="pp">${isNew ? 'PIN' : 'New PIN'} <span class="mute">(4 to 8 digits${isNew ? '' : ', leave empty to keep'})</span></label><input id="pp" type="password" inputmode="numeric" maxlength="8" autocomplete="new-password">
+       <label for="pp2">Same PIN again</label><input id="pp2" type="password" inputmode="numeric" maxlength="8" autocomplete="new-password">
+       <button class="btn block mt" type="submit">Save</button>
+       ${person && !person.nopin ? `<button class="btn line block mt" type="button" id="toggle">${person.active === false ? 'Switch on again' : 'Switch off (keeps their past sales)'}</button>` : ''}
+     </form>`,
+    (p) => {
+      let manager = draftMgr;
+      p.querySelectorAll('[data-r]').forEach((b) => (b.onclick = () => ((manager = b.dataset.r === 'manager'), p.querySelectorAll('[data-r]').forEach((x) => x.setAttribute('aria-pressed', String(x === b))))));
+      const tg = p.querySelector('#toggle');
+      if (tg)
+        tg.onclick = async () => {
+          const mgrsLeft = S.staff.filter((x) => x.id !== person.id && x.manager && x.active !== false).length;
+          if (person.active !== false && person.manager && !mgrsLeft && S.staff.some((x) => x.id !== person.id && x.active !== false)) return personSheet(person, 'Keep at least one manager switched on.', { name, manager });
+          S.staff = S.staff.map((x) => (x.id === person.id ? { ...x, active: x.active === false } : x));
+          await saveStaff();
+          booksDirty = true;
+          staffSheet({ text: `${person.name} switched ${person.active === false ? 'on' : 'off'}.` });
+        };
+      p.querySelector('#pf').onsubmit = async (ev) => {
+        ev.preventDefault();
+        const name = fromServer ? person.name : ($('pn').value || '').trim();
+        const pin = $('pp').value;
+        if (!name) return personSheet(person, 'Enter the name.', { name, manager });
+        // The first PIN on this phone must belong to a manager: after it the phone asks a manager to approve changes, and
+        // with only a cashier's PIN nobody could (a server-linked phone cannot promote a server cashier itself).
+        if (firstOne && !(fromServer ? person.manager : manager)) return personSheet(person, 'Set a manager\'s PIN first, so someone can approve discounts, refunds and staff changes.', { name, manager });
+        if (isNew || pin) {
+          if (!validPin(pin)) return personSheet(person, 'The PIN must be 4 to 8 digits.', { name, manager });
+          if (weakPin(pin)) return personSheet(person, 'That PIN is too easy to guess (like 1111 or 1234). Choose another.', { name, manager });
+          if (pin !== $('pp2').value) return personSheet(person, 'The two PINs are not the same.', { name, manager });
+          if (await pinTaken(S.staff, pin, person && person.id)) return personSheet(person, 'Someone else already uses that PIN. Choose another.', { name, manager });
+        }
+        if (!fromServer && person && person.manager && !manager && !S.staff.some((x) => x.id !== person.id && x.manager && x.active !== false)) return personSheet(person, 'Keep at least one manager.', { name, manager });
+        const pinRec = pin ? await hashPin(pin) : person && person.pin;
+        const id = person && !person.nopin ? person.id : `st-${newId()}`;
+        const rec = { id, name, manager: fromServer ? !!person.manager : manager, pin: pinRec, active: person && person.active === false ? false : true, ...(fromServer ? { serverId: person.serverId } : {}) };
+        S.staff = [...S.staff.filter((x) => x.id !== id), rec];
+        await saveStaff();
+        booksDirty = true; // redraw the header (who is on the phone) when the sheet closes
+        if (firstOne) S.who = { id: rec.id, name: rec.name, manager: rec.manager, serverId: rec.serverId };
+        staffSheet({ text: `${name} saved.${firstOne ? ' From now on this phone asks for a PIN.' : ''}` });
+      };
+    },
+  );
+}
+
+/** Server-linked phones: keep names and manager flags in step with the server's staff list. */
+async function syncStaffFromServer() {
+  if (!S.snap || S.snap.local || !Array.isArray(S.snap.staff)) return;
+  let changed = false;
+  S.staff = S.staff.map((p) => {
+    const u = p.serverId && S.snap.staff.find((x) => x.id === p.serverId);
+    if (!p.serverId) return p;
+    if (!u) return p.active === false ? p : ((changed = true), { ...p, active: false }); // left the restaurant
+    if (u.name !== p.name || !!u.manager !== !!p.manager) return ((changed = true), { ...p, name: u.name, manager: !!u.manager });
+    return p;
+  });
+  if (changed) await saveStaff();
 }
 
 // -------------------------------------------------------------------- sell ---
@@ -756,6 +1100,58 @@ function bindSetup() {
   if (h) h.onclick = async () => ((S.setupDismissed = true), await kv.set('setupDismissed', 1), viewSell());
 }
 
+function pauseLabel(item) {
+  const options = { hour: '2-digit', minute: '2-digit', timeZone: S.snap.restaurant.timezone || 'UTC', timeZoneName: 'short' };
+  try {
+    return 'Paused until ' + new Date(item.pausedUntil).toLocaleTimeString('en', options);
+  } catch (error) {
+    if (!(error instanceof RangeError)) throw error;
+    return 'Paused until ' + new Date(item.pausedUntil).toUTCString();
+  }
+}
+
+let pauseTimer;
+function refreshDishButtons() {
+  clearTimeout(pauseTimer);
+  if (!S.snap) return;
+  let next = Infinity;
+  const now = Date.now();
+  const menu = new Map(S.snap.items.map((item) => [item.id, item]));
+  for (const button of document.querySelectorAll('[data-add]')) {
+    const item = menu.get(button.dataset.add);
+    if (!item) continue;
+    const until = activePauseUntil(item, now);
+    button.disabled = !item.sellOffline || !!item.soldOut || !!until;
+    const label = button.querySelector('[data-pause-label]');
+    label.hidden = !until;
+    label.textContent = until ? pauseLabel(item) : '';
+    if (until) next = Math.min(next, until);
+  }
+  if (Number.isFinite(next)) pauseTimer = setTimeout(refreshDishButtons, Math.min(2_147_483_647, Math.max(0, next - Date.now())));
+}
+
+let refreshingPauses = false;
+async function refreshLinkedPauses() {
+  const snap = S.snap;
+  // Older servers and phone-only menus have no sales pauses.
+  if (refreshingPauses || syncGate || !snap || snap.local || !snap.items.some((i) => 'pausedUntil' in i)) return;
+  refreshingPauses = true;
+  try {
+    const rows = await fetchMenuPauses(snap.branch.id);
+    if (!rows) return;
+    const updated = mergeMenuPauses(S.snap, snap, rows);
+    if (updated === S.snap) return;
+    S.snap = updated;
+    refreshDishButtons();
+    checkPaymentPause?.();
+    await kv.update('snapshot', (current) => mergeMenuPauses(current, snap, rows));
+  } catch {
+    // Unreachable servers leave the last known deadlines available offline.
+  } finally {
+    refreshingPauses = false;
+  }
+}
+
 function viewSell() {
   const { categories, items } = S.snap;
   const q = S.q.trim().toLowerCase();
@@ -763,40 +1159,149 @@ function viewSell() {
   $('view').innerHTML = `
     ${setupCard()}
     ${S.orderId || S.table ? `<div class="note" role="status">${S.type === 'DINE_IN' ? `Dine in${S.table ? ` &middot; <b>${esc(S.table)}</b>` : ''}` : 'Takeaway'}${cartCount() ? ' &middot; saved automatically' : ''}</div>` : ''}
-    ${items.length ? `<input class="search" id="q" type="search" placeholder="Search the menu" value="${esc(S.q)}" aria-label="Search the menu">` : ''}
+    ${items.length ? `<div class="searchrow"><input class="search" id="q" type="search" enterkeyhint="go" placeholder="Search, or type / scan a barcode" value="${esc(S.q)}" aria-label="Search the menu or enter a barcode">${plugins().BarcodeScanner ? '<button class="btn ghost" id="scan" type="button" aria-label="Scan a barcode with the camera">Scan</button>' : ''}</div>` : ''}
     <div class="chips" role="group" aria-label="Categories" ${items.length ? '' : 'hidden'}>
       <button class="chip" data-cat="all" aria-pressed="${S.category === 'all'}">All</button>
       ${categories.map((c) => `<button class="chip" data-cat="${esc(c.id)}" aria-pressed="${S.category === c.id}">${esc(c.name)}</button>`).join('')}
     </div>
     <div class="grid dishes">
-      ${shown.map((i) => `<button class="dish" data-add="${esc(i.id)}" ${i.sellOffline && !i.soldOut ? '' : 'disabled'}>
+      ${shown.map((i) => `<button class="dish${qtyOf(i.id) ? ' in' : ''}" data-add="${esc(i.id)}" ${i.sellOffline && !i.soldOut ? '' : 'disabled'}>
           <b><span class="veg ${i.isVeg ? '' : 'nv'}"></span>${esc(i.name)}</b>
-          <span>${inr(i.price)}${S.cart.get(i.id)?.qty ? ` &middot; <strong style="color:var(--brand)">&times;${S.cart.get(i.id).qty}</strong>` : ''}</span>
-          ${i.soldOut ? '<small>Sold out</small>' : i.sellOffline ? (i.stock != null && i.stock <= 5 ? `<small>${i.stock} left</small>` : '') : '<small>Needs options: use the full app</small>'}
+          <span>${inr(i.price)}${i.halfPrice != null ? ` <small>/ half ${inr(i.halfPrice)}</small>` : ''}</span>${qtyOf(i.id) ? `<strong class="cnt"><span class="sr">In cart: </span>&times;${qtyOf(i.id)}</strong>` : ''}
+          ${i.soldOut ? '<small>Sold out</small>' : i.sellOffline ? (i.stock != null && i.stock <= 5 ? `<small>${i.stock} left</small>` : needsChoice(i) ? '<small>Choose options</small>' : '') : '<small>Combo: use the full app</small>'}
+          <small data-pause-label hidden></small>
         </button>`).join('') || (S.snap.local && !S.snap.items.length ? '<div class="empty"><b>Your menu is empty</b><p class="mute">Add your first dish to start selling.</p><button class="btn" data-setup="menu">Add a dish</button></div>' : '<p class="mute center mt empty">Nothing matches.</p>')}
     </div>`;
   bindSetup();
-  if ($('q')) $('q').oninput = (e) => {
-    S.q = e.target.value;
-    viewSell();
-    $('q').focus();
-    $('q').setSelectionRange(S.q.length, S.q.length);
-  };
+  if ($('q')) {
+    $('q').oninput = (e) => {
+      S.q = e.target.value;
+      viewSell();
+      $('q').focus();
+      $('q').setSelectionRange(S.q.length, S.q.length);
+    };
+    // Enter: an exact barcode/SKU (what a USB or Bluetooth scanner types), else the only dish that matches.
+    $('q').onkeydown = (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const hit = findByCode(S.snap.items, S.q) || (shown.length === 1 ? shown[0] : null);
+      if (!hit) return toast(S.q.trim() ? `Nothing on the menu has the code or name "${S.q.trim()}".` : 'Type a dish name or a barcode.');
+      S.q = '';
+      tapDish(hit);
+    };
+  }
+  if ($('scan')) $('scan').onclick = scanBarcode;
   document.querySelectorAll('[data-cat]').forEach((b) => (b.onclick = () => ((S.category = b.dataset.cat), viewSell())));
-  document.querySelectorAll('[data-add]').forEach(
-    (b) =>
-      (b.onclick = () => {
-        const item = S.snap.items.find((i) => i.id === b.dataset.add);
-        const line = S.cart.get(item.id) || { item, qty: 0 };
-        if (item.stock != null && line.qty >= item.stock) return toast(`Only ${item.stock} left in stock`);
-        line.qty++;
-        S.cart.set(item.id, line);
-        viewSell();
-        renderBar();
-        navigator.vibrate && navigator.vibrate(10);
-      }),
-  );
+  document.querySelectorAll('[data-add]').forEach((b) => (b.onclick = () => tapDish(S.snap.items.find((i) => i.id === b.dataset.add))));
+  refreshDishButtons();
   renderBar();
+}
+
+/** A dish was tapped (or scanned): straight into the cart, or the options sheet first. */
+function tapDish(item) {
+  if (!item) return;
+  if (activePauseUntil(item)) return toast(pauseLabel(item));
+  if (!item.sellOffline) return toast(`${item.name} is a combo: sell it from the full app.`);
+  if (item.soldOut) return toast(`${item.name} is sold out.`);
+  if (needsChoice(item)) return optionsSheet(item);
+  addLine(item, buildChoice(item, {}).line);
+}
+
+function addLine(item, line, qty = 1) {
+  const latest = S.snap.items.find((dish) => dish.id === item.id);
+  if (activePauseUntil(latest)) return toast(pauseLabel(latest));
+  if (item.stock != null && qtyOf(item.id) + qty > item.stock) return toast(`Only ${item.stock} left in stock`);
+  const cur = S.cart.get(line.key) || { ...line, baseName: item.name, qty: 0 };
+  cur.qty += qty;
+  S.cart.set(line.key, cur);
+  if (S.view === 'sell' && $('sheet').hidden) viewSell();
+  renderBar();
+  navigator.vibrate && navigator.vibrate(10);
+}
+
+/** Half or full, and the add-ons, for one dish. */
+function optionsSheet(item, picks = defaultPicks(item), errors = {}, qty = 1) {
+  const choice = buildChoice(item, picks);
+  const price = choice.ok ? choice.line.item.price : null;
+  openSheet(
+    `<header><h2>${esc(item.name)}</h2><button class="x" data-close aria-label="Close">&times;</button></header>
+     <div class="body">
+       ${item.halfPrice != null ? `<fieldset class="opt"><legend>Portion</legend><div class="seg" role="group" aria-label="Portion">
+         <button type="button" data-portion="FULL" aria-pressed="${picks.portion !== 'HALF'}">Full &middot; ${inr(item.price)}</button>
+         <button type="button" data-portion="HALF" aria-pressed="${picks.portion === 'HALF'}">Half &middot; ${inr(item.halfPrice)}</button></div></fieldset>` : ''}
+       ${(item.options || [])
+         .map((g) => {
+           const single = g.max === 1;
+           const hint = g.min > 0 ? (single ? 'Choose one' : `Choose ${g.min}${g.max > g.min ? ` to ${g.max}` : ''}`) : `Optional${g.max < g.choices.length ? `, up to ${g.max}` : ''}`;
+           return `<fieldset class="opt" aria-describedby="h-${esc(g.id)}"><legend>${esc(g.name)} <small id="h-${esc(g.id)}" class="mute">${hint}</small></legend>
+             ${errors[g.id] ? `<p class="note bad" role="alert">${esc(errors[g.id])}</p>` : ''}
+             ${g.choices
+               .map((c) => `<label class="chk optrow"><input type="${single ? 'radio' : 'checkbox'}" name="g-${esc(g.id)}" data-g="${esc(g.id)}" value="${esc(c.id)}" ${(picks.chosen[g.id] || []).includes(c.id) ? 'checked' : ''}> <span class="grow">${esc(c.name)}</span>${c.price ? `<small>+${inr(c.price)}</small>` : ''}</label>`)
+               .join('')}</fieldset>`;
+         })
+         .join('')}
+       <div class="row mt"><span class="grow">Quantity</span><div class="qty"><button type="button" id="oqdown" aria-label="One less">&minus;</button><b>${qty}</b><button type="button" id="oqup" aria-label="One more">+</button></div></div>
+     </div>
+     <footer><button class="btn block" id="oadd">${price != null ? `Add ${qty > 1 ? `${qty} &middot; ` : ''}${inr(price * qty)}` : 'Add'}</button></footer>`,
+    (p) => {
+      const read = () => {
+        const chosen = {};
+        for (const g of item.options || []) chosen[g.id] = [...p.querySelectorAll(`[data-g="${CSS.escape(g.id)}"]:checked`)].map((x) => x.value);
+        return { ...picks, chosen };
+      };
+      p.querySelectorAll('[data-portion]').forEach((b) => (b.onclick = () => optionsSheet(item, { ...read(), portion: b.dataset.portion }, {}, qty)));
+      p.querySelectorAll('[data-g]').forEach((x) => (x.onchange = () => optionsSheet(item, read(), {}, qty)));
+      p.querySelector('#oqdown').onclick = () => optionsSheet(item, read(), {}, Math.max(1, qty - 1));
+      p.querySelector('#oqup').onclick = () => optionsSheet(item, read(), {}, Math.min(99, qty + 1));
+      p.querySelector('#oadd').onclick = () => {
+        const r = buildChoice(item, read());
+        if (!r.ok) return optionsSheet(item, read(), r.errors, qty);
+        closeSheet();
+        addLine(item, r.line, qty);
+        if (S.view === 'sell') viewSell();
+      };
+    },
+  );
+}
+
+// Hardware scanner anywhere on the sell screen: it types a fast burst + Enter, which used to land nowhere unless the
+// search box happened to have focus (and Enter on a focused button even pressed that button). The search box keeps its
+// own Enter handler, so text fields are left alone here.
+let scanBuf = { text: '', last: 0 };
+document.addEventListener(
+  'keydown',
+  (e) => {
+    if (S.view !== 'sell' || !S.snap || e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+    if (!$('sheet').hidden || document.querySelector('.pinlayer')) return;
+    const r = pushKey(scanBuf, e.key, e.timeStamp);
+    scanBuf = r.buf;
+    if (!r.code) return;
+    e.preventDefault();
+    const hit = findByCode(S.snap.items, r.code);
+    if (!hit) return toast(`No dish has the barcode ${r.code}. Add it to the dish first.`, 4000);
+    tapDish(hit);
+  },
+  true,
+);
+
+/** Camera barcode scan (the app's ML Kit scanner): the dish with that barcode or SKU goes into the cart. */
+async function scanBarcode() {
+  const sc = plugins().BarcodeScanner;
+  if (!sc) return;
+  try {
+    const perm = await sc.requestPermissions();
+    if (perm.camera !== 'granted' && perm.camera !== 'limited') return toast('The camera is needed to scan. You can type the code in the search box instead.', 4000);
+    const r = await sc.scan({});
+    const code = r.barcodes && r.barcodes[0] && r.barcodes[0].rawValue;
+    if (!code) return;
+    const hit = findByCode(S.snap.items, code);
+    if (!hit) return toast(`No dish has the barcode ${code}. Add it to the dish first.`, 4000);
+    tapDish(hit);
+  } catch (e) {
+    if (!/cancel/i.test(String(e && e.message))) toast('Could not scan. Type the code in the search box instead.');
+  }
 }
 function renderBar() {
   persistSoon();
@@ -825,15 +1330,18 @@ function openCart() {
         <div style="margin-top:.6rem">${lines
           .map(
             (l) => `<div class="row"><div class="grow"><b>${esc(l.item.name)}</b><br><small>${inr(l.item.price)} each</small></div>
-            <div class="qty"><button data-dec="${esc(l.item.id)}" aria-label="One less">&minus;</button><b>${l.qty}</b><button data-inc="${esc(l.item.id)}" aria-label="One more">+</button></div>
+            <div class="qty"><button data-dec="${esc(l.key)}" aria-label="One less ${esc(l.item.name)}">&minus;</button><b>${l.qty}</b><button data-inc="${esc(l.key)}" aria-label="One more ${esc(l.item.name)}">+</button></div>
             <b style="min-width:5.5rem;text-align:right">${inr(l.item.price * l.qty)}</b></div>
-            <div style="padding:.2rem 0 .5rem;border-bottom:1px solid var(--line)">${S.noteOpen === l.item.id ? `<input data-note="${esc(l.item.id)}" maxlength="80" value="${esc(l.note || '')}" placeholder="e.g. no onion, less spicy" aria-label="Note for ${esc(l.item.name)}">` : `<button class="chip" data-opennote="${esc(l.item.id)}">${l.note ? `Note: ${esc(l.note)}` : '+ Note'}</button>`}${l.sent ? ` <small class="mute">${l.sent} on a KOT</small>` : ''}</div>`,
+            <div style="padding:.2rem 0 .5rem;border-bottom:1px solid var(--line)">${S.noteOpen === l.key ? `<input data-note="${esc(l.key)}" maxlength="80" value="${esc(l.note || '')}" placeholder="e.g. no onion, less spicy" aria-label="Note for ${esc(l.item.name)}">` : `<button class="chip sm" data-opennote="${esc(l.key)}">${l.note ? `Note: ${esc(l.note)}` : '+ Note'}</button>`}${l.sent ? ` <small class="mute">${l.sent} on a KOT</small>` : ''}</div>`,
           )
           .join('')}</div>
         <label for="dp">Discount %</label><input id="dp" type="number" inputmode="decimal" min="0" max="${esc(S.snap.restaurant.maxManualDiscountPercent)}" value="${S.discountPercent || ''}" placeholder="0">
+        ${S.discountPercent > 0 ? `<label for="dr">Reason for the discount${S.snap.restaurant.requireDiscountReason ? '' : ' (optional)'}</label><input id="dr" maxlength="200" value="${esc(S.discountReason)}" ${S.snap.restaurant.requireDiscountReason ? 'required' : ''} autocomplete="off" enterkeyhint="done">` : ''}
+        ${S.scPct > 0 && can('offlineOptions') ? `<label class="chk mt"><input type="checkbox" id="sc" ${S.serviceCharge ? 'checked' : ''}> Service charge ${esc(S.scPct)}% <small class="mute">(only if the guest agrees)</small></label>` : ''}
         <div class="mt">
           <div class="tot"><span>Subtotal</span><span>${inr(bill.subtotal)}</span></div>
           ${bill.discountAmount > 0 ? `<div class="tot"><span>Discount</span><span>-${inr(bill.discountAmount)}</span></div>` : ''}
+          ${bill.serviceCharge > 0 ? `<div class="tot"><span>Service charge (optional)</span><span>${inr(bill.serviceCharge)}</span></div>` : ''}
           ${bill.tax > 0 ? `<div class="tot mute"><span>${esc(S.snap.branch.taxLabel || 'Tax')} (included)</span><span>${inr(bill.tax)}</span></div>` : ''}
           <div class="tot big"><span>Total</span><span>${inr(bill.total)}</span></div>
         </div>
@@ -878,70 +1386,192 @@ function openCart() {
       render();
     };
     root.querySelector('#void').onclick = cancelOrderSheet;
-    root.querySelectorAll('[data-inc]').forEach((b) => (b.onclick = () => (S.cart.get(b.dataset.inc).qty++, draw())));
-    root.querySelectorAll('[data-dec]').forEach((b) => (b.onclick = () => (S.cart.get(b.dataset.dec).qty--, draw())));
-    root.querySelector('#dp').onchange = (e) => {
+    root.querySelectorAll('[data-inc]').forEach(
+      (b) =>
+        (b.onclick = () => {
+          const l = S.cart.get(b.dataset.inc);
+          const item = S.snap.items.find((i) => i.id === l.item.id);
+          if (activePauseUntil(item)) return toast(pauseLabel(item));
+          if (item && item.stock != null && qtyOf(item.id) >= item.stock) return toast(`Only ${item.stock} left in stock`);
+          l.qty++;
+          draw();
+        }),
+    );
+    root.querySelectorAll('[data-dec]').forEach(
+      (b) =>
+        (b.onclick = async () => {
+          const l = S.cart.get(b.dataset.dec);
+          // Taking off a dish the kitchen already has is a cancellation: a manager says yes on a shared phone.
+          if (l.sent && l.qty <= l.sent && !(await managerOK(`Cancel 1 × ${l.item.name}: the kitchen already has it.`))) return;
+          l.qty--;
+          draw();
+        }),
+    );
+    const sc = root.querySelector('#sc');
+    if (sc) sc.onchange = () => ((S.serviceCharge = sc.checked), draw());
+    root.querySelector('#dp').onchange = async (e) => {
       const max = Number(S.snap.restaurant.maxManualDiscountPercent) || 100;
-      S.discountPercent = Math.min(Math.max(Number(e.target.value) || 0, 0), max);
+      const want = Math.min(Math.max(Number(e.target.value) || 0, 0), max);
+      if (want > (S.discountPercent || 0) && !(await managerOK(`Give a ${want}% discount.`))) {
+        e.target.value = S.discountPercent || '';
+        return;
+      }
+      S.discountPercent = want;
       draw();
     };
+    const dr = root.querySelector('#dr');
+    if (dr) dr.oninput = (e) => { S.discountReason = e.target.value; persistSoon(); };
     bindPrint(root, saleFrom('Bill', bill, [], 0), true);
-    root.querySelector('#charge').onclick = () => openPay();
+    root.querySelector('#charge').onclick = () => {
+      if (S.discountPercent > 0 && S.snap.restaurant.requireDiscountReason && !S.discountReason.trim()) {
+        toast('Add a reason for the discount first.', 3500);
+        if (dr) dr.focus();
+        return;
+      }
+      openPay();
+    };
   };
   openSheet('', draw);
   draw();
-  $('sheet').onclick = (e) => e.target === $('sheet') && (closeSheet(), renderBar(), viewSell());
+  $('sheet').onclick = (e) => {
+    // Block body on purpose: an onclick that returns false cancels the click (it stopped checkboxes in the cart working).
+    if (e.target === $('sheet')) (closeSheet(), renderBar(), viewSell());
+  };
 }
 
 // ------------------------------------------------------------------ payment ---
-function openPay() {
+async function openPay() {
+  if (checkoutInFlight) return;
+  const cartPanel = $('sheet').firstElementChild;
   const bill = billOf();
-  let rows = [{ method: 'CASH', amount: String(bill.total) }];
+  const sig = checkoutSig(saleFrom('', bill, [], 0));
+  const pending = await kv.get('pendingSale');
+  let savedSale = pending?.sig === sig ? await sales.get(pending.saleId) : null;
+  const linkedOrder = savedSale?.orderId ? await orders.get(savedSale.orderId) : null;
+  if (!cartPanel.isConnected || checkoutInFlight) return;
+  if (linkedOrder?.status === 'PAID') {
+    // Older builds could leave a marker for the previous, identical purchase.
+    await kv.del('pendingSale');
+    savedSale = null;
+    if (!cartPanel.isConnected || checkoutInFlight) return;
+  }
+  let pendingStock = !!(savedSale && pending.stockApplied);
+  let editingSavedPayment = false;
+  let panel;
+  function stopPausedPayment() {
+    const paused = !savedSale && pausedAddition(S.snap.items, S.cart.values());
+    if (!paused) return false;
+    if (panel?.isConnected) openCart();
+    toast(`${paused.name}: ${pauseLabel(paused)}. Remove the unsent quantity to continue.`, 5000);
+    return true;
+  }
+  if (stopPausedPayment()) return;
+  const rows = savedSale?.payments.length
+    ? savedSale.payments.map((p) => ({ ...p, amount: String(p.tendered ?? p.amount) }))
+    : [{ method: 'CASH', amount: String(savedSale?.payLater ? 0 : bill.total) }];
+  const currentPayment = () => settle(bill.total, rows.map((r) => ({ ...r, amount: Number(r.amount) || 0 })));
+  let finished = false; // set once the sale commits; stale redraws must not restore Payment
   const METHODS = [['CASH', 'Cash'], ['UPI', 'UPI'], ['CARD', 'Card'], ['OTHER', 'Other']];
   const draw = async () => {
-    const tenders = rows.map((r) => ({ method: r.method, amount: Number(r.amount) || 0, reference: r.reference }));
-    const st = settle(bill.total, tenders);
-    const upiRow = rows.find((r) => r.method === 'UPI');
+    if (finished || !panel.isConnected || stopPausedPayment()) return;
+    if (savedSale && !editingSavedPayment) {
+      panel.innerHTML = `<header><h2>Finish saved sale</h2><button class="x" data-close aria-label="Close">&times;</button></header>
+        <div class="body"><p class="note" role="status">Payment for bill ${esc(savedSale.localNumber)} is already recorded. Finish saving it on this phone.</p></div>
+        <footer><button class="btn line" id="editpay">Edit payment details</button><button class="btn block" id="finish">Finish saved sale</button></footer>`;
+      panel.querySelector('[data-close]').onclick = openCart;
+      panel.querySelector('#editpay').onclick = () => { editingSavedPayment = true; draw(); };
+      panel.querySelector('#finish').onclick = () => complete(
+        { rows: savedSale.payments, change: savedSale.change, fullyPaid: !savedSale.payLater },
+        { payLater: !!savedSale.payLater },
+      );
+      return;
+    }
+    const st = currentPayment();
+    // A retry corrects the saved record. Never prompt the guest to pay a second time.
+    const upiRow = !savedSale && rows.find((r) => r.method === 'UPI');
     let qr = '';
     if (upiRow && S.snap.restaurant.upiVpa && window.OrderRestroQR) {
       const amt = Number(upiRow.amount) || bill.total;
       const svg = await window.OrderRestroQR.svg(upiLink({ vpa: S.snap.restaurant.upiVpa, name: S.snap.restaurant.upiPayeeName, amount: amt }), 240);
       qr = `<div class="qr" aria-label="UPI QR code">${svg}</div><p class="center mute">Ask the guest to scan, then confirm below when the payment shows on your phone.</p>`;
     } else if (upiRow) qr = '<div class="note">No UPI id is set for this restaurant. Take the UPI payment on your own phone and note the reference.</div>';
-    const root = $('sheet').firstElementChild;
+    if (finished || !panel.isConnected || stopPausedPayment()) return;
+    const root = panel;
     root.innerHTML = `
       <header><h2>Payment</h2><button class="x" data-close aria-label="Close">&times;</button></header>
       <div class="body">
-        <div class="tot big"><span>Total</span><span>${inr(bill.total)}</span></div>
+        <div class="paycard" role="status">
+          <div class="tot big"><span>Bill total</span><span>${inr(bill.total)}</span></div>
+          <div class="tot"><span>Customer pays now</span><span>${inr(bill.total - st.balance)}</span></div>
+          ${st.change > 0 ? `<div class="tot big ok"><span>Change to give</span><span>${inr(st.change)}</span></div>` : ''}
+          ${!st.fullyPaid ? `<div class="tot big due"><span>Balance due${can('offlineOptions') ? ' (goes to dues)' : ''}</span><span>${inr(st.balance)}</span></div>` : ''}
+        </div>
         ${rows
           .map(
             (r, i) => `<div class="mt"><div class="seg" role="group" aria-label="Payment method">${METHODS.map(([m, l]) => `<button data-m="${i}:${m}" aria-pressed="${r.method === m}">${l}</button>`).join('')}</div>
-            <label for="am${i}">${r.method === 'CASH' ? 'Cash received' : 'Amount'}</label>
+            <label for="am${i}">${rows.length === 1 ? 'Customer pays now' : r.method === 'CASH' ? 'Cash received' : 'Amount'}</label>
             <input id="am${i}" data-am="${i}" type="number" inputmode="decimal" value="${esc(r.amount)}">
-            ${r.method === 'CASH' ? `<div class="chips mt" style="padding-bottom:0">${[bill.total, 100, 200, 500, 2000].map((q) => `<button class="chip" data-q="${i}:${q}">${q === bill.total ? 'Exact' : q}</button>`).join('')}</div>` : ''}
+            ${r.method === 'CASH' ? `<div class="chips mt" style="padding-bottom:0">${[bill.total, 100, 200, 500, 2000].filter((q, k, a) => a.indexOf(q) === k).map((q) => `<button class="chip" data-q="${i}:${q}">${q === bill.total ? 'Exact' : q}</button>`).join('') + (can('offlineOptions') ? `<button class="chip" data-q="${i}:0">Nothing now</button>` : '')}</div>` : ''}
             ${r.method !== 'CASH' ? `<label for="rf${i}">Reference (optional)</label><input id="rf${i}" data-rf="${i}" value="${esc(r.reference || '')}" placeholder="Transaction id">` : ''}</div>`,
           )
           .join('')}
         ${qr}
         <button class="btn line block mt" id="split">+ Add another payment</button>
-        <div class="mt">
-          ${st.change > 0 ? `<div class="tot big" style="color:var(--ok)"><span>Change to give</span><span>${inr(st.change)}</span></div>` : ''}
-          ${!st.fullyPaid ? `<div class="tot big" style="color:var(--bad)"><span>Still to pay</span><span>${inr(st.balance)}</span></div>` : ''}
-        </div>
+        <details class="mt" ${S.customer.phone || S.customer.name || !st.fullyPaid ? 'open' : ''}><summary>Customer ${S.customer.name || S.customer.phone ? `&middot; ${esc(S.customer.name || S.customer.phone)}` : st.fullyPaid ? '<span class="mute">(optional)</span>' : '<span class="mute">(required for credit)</span>'}</summary>
+          <label for="cn">${st.fullyPaid ? 'Name' : 'Customer name'}</label><input id="cn" autocomplete="off" maxlength="100" value="${esc(S.customer.name)}" list="custs">
+          <label for="cph">${st.fullyPaid ? 'Phone' : 'Phone <span class="mute">(needed to track what they owe)</span>'}</label><input id="cph" type="tel" inputmode="tel" autocomplete="off" maxlength="20" value="${esc(S.customer.phone)}" list="custph">
+          <datalist id="custs">${knownCustomers.map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>
+          <datalist id="custph">${knownCustomers.map((c) => `<option value="${esc(c.phone)}">${esc(c.name)}</option>`).join('')}</datalist>
+        </details>
       </div>
-      <footer><button class="btn block" id="done" ${st.fullyPaid ? '' : 'disabled'}>Complete sale</button></footer>`;
+      <footer>${
+        !st.fullyPaid && can('offlineOptions')
+          ? `<button class="btn block" id="later" ${phoneOk(S.customer.phone) ? '' : 'aria-disabled="true"'}>Save sale &middot; ${inr(st.balance)} on credit</button>`
+          : `<button class="btn block" id="done" ${st.fullyPaid ? '' : 'disabled'}>Complete sale</button>`
+      }</footer>`;
     root.querySelector('[data-close]').onclick = openCart;
     root.querySelectorAll('[data-m]').forEach((b) => (b.onclick = () => ((rows[Number(b.dataset.m.split(':')[0])].method = b.dataset.m.split(':')[1]), draw())));
     root.querySelectorAll('[data-am]').forEach((el) => (el.oninput = () => ((rows[Number(el.dataset.am)].amount = el.value), softRedraw())));
     root.querySelectorAll('[data-rf]').forEach((el) => (el.oninput = () => (rows[Number(el.dataset.rf)].reference = el.value)));
     root.querySelectorAll('[data-q]').forEach((b) => (b.onclick = () => ((rows[Number(b.dataset.q.split(':')[0])].amount = b.dataset.q.split(':')[1]), draw())));
     root.querySelector('#split').onclick = () => {
-      const left = round2(Math.max(bill.total - tenders.reduce((s, t) => s + t.amount, 0), 0));
+      const left = currentPayment().balance;
       rows.push({ method: 'UPI', amount: String(left || '') });
       draw();
     };
-    root.querySelector('#done').onclick = () => complete(st, tenders);
+    const doneBtn = root.querySelector('#done');
+    if (doneBtn) doneBtn.onclick = () => complete(currentPayment());
+    const keepCust = () => {
+      S.customer = { name: root.querySelector('#cn').value, phone: root.querySelector('#cph').value };
+      persistSoon();
+    };
+    root.querySelector('#cn').oninput = keepCust;
+    root.querySelector('#cph').oninput = () => {
+      keepCust();
+      const known = knownCustomers.find((c) => c.phone === S.customer.phone.trim());
+      if (known && !S.customer.name.trim()) root.querySelector('#cn').value = S.customer.name = known.name;
+      const later = root.querySelector('#later');
+      if (later) later.setAttribute('aria-disabled', String(!phoneOk(S.customer.phone)));
+    };
+    const later = root.querySelector('#later');
+    if (later)
+      later.onclick = async () => {
+        keepCust();
+        if (!phoneOk(S.customer.phone)) {
+          toast('Enter the customer\'s phone number to let them pay later.', 3500);
+          return root.querySelector('#cph').focus();
+        }
+        if (!(await managerOK(`Let ${S.customer.name || S.customer.phone} pay ${inr(st.balance)} later.`))) return;
+        complete(currentPayment(), { payLater: true });
+      };
   };
+  const phoneOk = (v) => String(v || '').replace(/\D/g, '').length >= 10;
+  let knownCustomers = [];
+  sales.all().then((all) => {
+    const m = new Map();
+    for (const x of all) if (x.customer && x.customer.phone && !m.has(x.customer.phone)) m.set(x.customer.phone, { name: x.customer.name || '', phone: x.customer.phone });
+    knownCustomers = [...m.values()].slice(0, 200);
+  });
   // typing re-renders the sheet; keep the caret in the field being edited
   let t;
   const softRedraw = () => {
@@ -963,23 +1593,74 @@ function openPay() {
       });
     }, 250);
   };
-  async function complete(st, tenders) {
-    if (!st.fullyPaid) return;
-    await flushPersist();
-    const number = await nextLocalNumber();
-    const sale = saleFrom(number, bill, st.rows.map((r) => ({ ...r })), st.change);
-    sale.note = saleNote(sale.items);
-    await sales.put(sale);
-    if (S.snap.local) S.snap = await useStock(S.snap, sale.items);
-    const o = S.orderId ? await orders.get(S.orderId) : null;
-    if (o) await orders.put({ ...o, status: 'PAID', saleId: sale.id, paidAt: new Date().toISOString() }); // frees the table
-    resetCart();
-    toast('Sale saved');
-    openDone(sale);
-    syncNow({ refreshMenu: false }).then(afterSync);
+  // Shared by every Payment sheet: a second sheet must not save the same cart.
+  async function complete(st, { payLater = false } = {}) {
+    if (checkoutInFlight || finished || !panel.isConnected) return;
+    if ((!st.fullyPaid && !payLater) || (payLater && !phoneOk(S.customer.phone))) return;
+    checkoutInFlight = true;
+    try {
+      await flushPersist();
+      // The unfinished checkout is remembered on disk (not only in this closure) so killing the app between
+      // "sale saved" and "stock deducted" cannot produce a second sale or a second deduction on retry: the same
+      // cart reuses the saved sale and skips a deduction that already committed.
+      if (savedSale) {
+        const draft = saleFrom(savedSale.localNumber, bill, st.rows, st.change);
+        const updated = {
+          ...savedSale,
+          bill: draft.bill,
+          payments: draft.payments,
+          change: draft.change,
+          customer: draft.customer,
+          staffId: draft.staffId,
+          staffName: draft.staffName,
+          staffServerId: draft.staffServerId,
+          discountPercent: draft.discountPercent,
+          discountReason: draft.discountReason,
+        };
+        if (payLater) updated.payLater = true;
+        else delete updated.payLater;
+        // Keep the marker and any stock deduction that already committed.
+        await sales.put(updated);
+        savedSale = updated;
+      } else {
+        const number = await nextLocalNumber();
+        if (stopPausedPayment()) return;
+        const nextSale = saleFrom(number, bill, st.rows.map((r) => ({ ...r })), st.change);
+        if (payLater) nextSale.payLater = true;
+        nextSale.note = saleNote(nextSale.items);
+        await savePendingSale(nextSale, sig);
+        savedSale = nextSale;
+      }
+      const sale = savedSale;
+      if (S.snap.local && !pendingStock) {
+        // useStock saves a copy and returns it only on success: a failed write leaves the stock untouched, so
+        // Tap-to-retry deducts exactly once. The marker is written right after the save has committed.
+        S.snap = await useStock(S.snap, sale.items, [
+          ['pendingSale', { saleId: sale.id, sig: checkoutSig(sale), stockApplied: true }],
+        ]);
+        pendingStock = true; // the marker committed in the same transaction as the new stock levels
+      }
+      // Mark the order PAID and remove the resume marker in ONE transaction.
+      // A crash between the two used to leave a stale marker that made the
+      // next identical cart reuse this already-paid sale.
+      await completeCheckout(S.orderId || null, sale.id, new Date().toISOString());
+      resetCart();
+      toast(payLater ? `Saved. ${inr(dueOf(sale))} to collect later.` : 'Sale saved');
+      finished = true;
+      openDone(sale);
+      gatedSync({ refreshMenu: false });
+    } catch (e) {
+      if (savedSale) draw();
+      toast(`Could not finish the sale: ${e.message}. Try again.`, 6000);
+    } finally {
+      checkoutInFlight = false;
+    }
   }
-  openSheet('', () => draw());
-  draw();
+  openSheet('', (root) => {
+    panel = root;
+    checkPaymentPause = () => !checkoutInFlight && stopPausedPayment();
+    draw();
+  });
 }
 
 function openDone(sale) {
@@ -989,6 +1670,7 @@ function openDone(sale) {
        <div style="font-size:3rem;color:var(--ok)" aria-hidden="true">&#10003;</div>
        <h2>${inr(sale.bill.total)}</h2>
        <p class="mute">Bill ${esc(sale.localNumber)}${sale.change > 0 ? ` &middot; give change ${inr(sale.change)}` : ''}</p>
+       ${dueOf(sale) > 0 ? `<div class="note warn"><b>${inr(dueOf(sale))} to collect later</b> from ${esc(sale.customer.name || sale.customer.phone)}. Find it under Sales &rsaquo; Money owed.</div>` : ''}
        <p class="note">${S.snap.local ? 'Saved on this phone. Connect a server later (Sync tab) and it is sent then.' : 'Saved on this phone. It goes to the server by itself when you are online.'}</p>
        <div class="mt">${printActions()}</div>
      </div>
@@ -1041,7 +1723,7 @@ async function viewBookings() {
         if (!cur) return;
         if (b.dataset.to === 'CANCELLED' && !confirm(`Cancel the booking for ${cur.customerName}?`)) return;
         await reservations.put(setStatus(cur, b.dataset.to));
-        syncNow({ refreshMenu: false }).then(afterSync);
+        gatedSync({ refreshMenu: false });
         viewBookings();
       }),
   );
@@ -1051,7 +1733,7 @@ async function viewBookings() {
         const cur = await reservations.get(b.dataset.seat);
         if (!cur) return;
         await reservations.put(setStatus(cur, 'ARRIVED'));
-        syncNow({ refreshMenu: false }).then(afterSync);
+        gatedSync({ refreshMenu: false });
         if (cur.tableLabel) {
           S.tablesTab = 'floor';
           return switchTo(null, { type: 'DINE_IN', table: cur.tableLabel });
@@ -1087,7 +1769,7 @@ function bookingSheet(tables) {
           await reservations.put(b);
           closeSheet();
           S.note = { text: `Booked ${b.customerName} for ${whenText(b.reservedAt)}.` };
-          syncNow({ refreshMenu: false }).then(afterSync);
+          gatedSync({ refreshMenu: false });
           viewBookings();
         } catch (e) {
           err.textContent = e.message;
@@ -1129,7 +1811,7 @@ async function viewTables() {
           <b>${esc(t.label)}</b><small>${o ? `${inr(orderBill(o).total)} &middot; ${minutesSince(o.createdAt, now)}m` : hb ? `Booked ${new Date(hb.reservedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : `Free &middot; ${t.capacity} seats`}</small>
           ${S.editTables && local ? `<span class="mini" data-deltbl="${esc(t.id)}" role="button" aria-label="Remove table ${esc(t.label)}">&times;</span>` : ''}</button>`;
       }).join('') || '<p class="mute">No tables in this section.</p>'}
-        ${local ? `<button class="tbl add" data-addtbl="${esc(f.id)}"><b>+ Table</b></button>` : ''}</div>`).join('')
+        ${local ? `<button class="tbl add" data-addtbl="${esc(f.id)}"><b>+ Table</b></button><button class="tbl add" data-addmany="${esc(f.id)}"><b>+ Several</b></button>` : ''}</div>`).join('')
       : `<div class="note">${local ? 'No tables yet. Add a section (for example Ground floor), then its tables.' : 'No tables are set up on the server. Add them in the full app, then sync.'}</div>`}
     ${local ? `<div class="mt grid"><button class="btn ghost" id="addsec">+ Add section</button><button class="btn ghost" id="edt">${S.editTables ? 'Done editing' : 'Edit tables'}</button></div>` : ''}
     <p class="mute mt">${local ? 'Tables and open orders are kept on this phone only. Another phone will not see them.' : 'Table status here is for this phone only. Other devices do not see these open orders until a sale is paid and synced.'}</p>`;
@@ -1181,6 +1863,41 @@ async function viewTables() {
           };
         })),
   );
+  document.querySelectorAll('[data-addmany]').forEach(
+    (b) =>
+      (b.onclick = () =>
+        openSheet(`<header><h2>Add several tables</h2><button class="x" data-close aria-label="Close">&times;</button></header><div class="body">
+          <label for="mp">Name</label><input id="mp" value="T" maxlength="12" autocomplete="off">
+          <label for="mf">Start at number</label><input id="mf" type="number" inputmode="numeric" value="1" min="0">
+          <label for="mc">How many tables</label><input id="mc" type="number" inputmode="numeric" value="10" min="1" max="100">
+          <label for="ms">Seats on each</label><input id="ms" type="number" inputmode="numeric" value="4" min="1" max="50">
+          <p class="note" id="mpre" role="status"></p></div><footer><button class="btn" id="ok">Add tables</button></footer>`, (p) => {
+          const pre = () => {
+            try {
+              const l = planTables({ existing: S.snap.floors.flatMap((f) => f.tables.map((t) => t.label)), prefix: p.querySelector('#mp').value, from: p.querySelector('#mf').value, count: p.querySelector('#mc').value });
+              p.querySelector('#mpre').textContent = l.length > 3 ? `Will add ${l.length} tables: ${l[0]}, ${l[1]} … ${l[l.length - 1]}` : `Will add: ${l.join(', ')}`;
+              return true;
+            } catch (e) {
+              p.querySelector('#mpre').textContent = e.message;
+              return false;
+            }
+          };
+          ['#mp', '#mf', '#mc'].forEach((id) => (p.querySelector(id).oninput = pre));
+          pre();
+          p.querySelector('#ok').onclick = async () => {
+            if (!pre()) return;
+            try {
+              S.snap = await addTables(S.snap, b.dataset.addmany, { prefix: p.querySelector('#mp').value, from: p.querySelector('#mf').value, count: p.querySelector('#mc').value, capacity: p.querySelector('#ms').value });
+              S.note = null;
+              closeSheet();
+              viewTables();
+            } catch (e) {
+              closeSheet();
+              fail(e);
+            }
+          };
+        })),
+  );
   document.querySelectorAll('[data-deltbl]').forEach(
     (b) =>
       (b.onclick = async (ev) => {
@@ -1222,8 +1939,11 @@ async function viewSales() {
       ${rep.voids ? `<dt>Cancelled orders</dt><dd>${rep.voids} (${inr(rep.voidValue)})</dd>` : ''}</dl>
     ${rep.top.length ? `<p class="mute" style="margin:.5rem 0 0">Top: ${rep.top.map((t) => `${esc(t.name)} &times;${t.qty}`).join(', ')}</p>` : ''}
     <p class="mute" style="margin:.5rem 0 0">Only sales taken on this phone, for today by the phone's clock.${S.snap.local ? '' : ' It is not the server total.'}${rep.notSynced ? ` ${rep.notSynced} not on the server yet.` : ''}</p></div>`;
+  const owed = dueSales(all);
+  const owedTotal = owed.reduce((n, x) => n + dueOf(x), 0);
   $('view').innerHTML = `
     ${reportCard}
+    ${owed.length ? `<button class="card mt owed" id="owed" style="width:100%;text-align:left"><b>Money owed</b> <span class="badge">${owed.length}</span><div class="tot big"><span>${owed.length} bill${owed.length === 1 ? '' : 's'} to collect</span><span>${inr(owedTotal)}</span></div></button>` : ''}
     <button class="btn line block mt" id="books">Books &amp; backup: expenses, close the day, reports</button>
     ${S.pending ? `<div class="note warn" role="status">${S.pending} sale${S.pending > 1 ? 's' : ''} saved on this phone, not on the server yet.</div>` : ''}
     ${nAttention ? `<div class="note bad" role="status">${nAttention} sale${nAttention > 1 ? 's were' : ' was'} refused by the server and still need${nAttention > 1 ? '' : 's'} a decision. Open ${nAttention > 1 ? 'each' : 'it'} to retry or set aside.</div>` : ''}
@@ -1232,12 +1952,13 @@ async function viewSales() {
       all
         .map(
           (s) => `<button class="row" style="width:100%;background:none;border:0;border-bottom:1px solid var(--line);text-align:left" data-sale="${esc(s.id)}">
-            <div class="grow"><b>${esc(s.localNumber)}</b>${s.serverOrderNumber ? ` <small>#${esc(s.serverOrderNumber)}</small>` : ''}${refundedTotal(s, rfs) ? ' <small style="color:var(--bad)">Refunded</small>' : ''}<br><small>${esc(new Date(s.soldAt).toLocaleString())} &middot; ${s.items.reduce((n, i) => n + i.quantity, 0)} items</small></div>
+            <div class="grow"><b>${esc(s.localNumber)}</b>${s.serverOrderNumber ? ` <small>#${esc(s.serverOrderNumber)}</small>` : ''}${refundedTotal(s, rfs) ? ' <small style="color:var(--bad)">Refunded</small>' : ''}${dueOf(s) > 0 ? ` <small style="color:var(--warn)">Owes ${inr(dueOf(s))}</small>` : ''}<br><small>${esc(new Date(s.soldAt).toLocaleString())} &middot; ${s.items.reduce((n, i) => n + i.quantity, 0)} items${s.customer ? ` &middot; ${esc(s.customer.name || s.customer.phone)}` : ''}${s.staffName ? ` &middot; ${esc(s.staffName)}` : ''}</small></div>
             <div style="text-align:right"><b>${inr(s.bill.total)}</b><br><span class="status ${s.status}">${label[s.status]}</span></div></button>`,
         )
         .join('') || '<p class="mute center mt">No sales on this phone yet.</p>'
     }</div>`;
   $('books').onclick = booksMenu;
+  if ($('owed')) $('owed').onclick = duesSheet;
   document.querySelectorAll('[data-sale]').forEach(
     (b) =>
       (b.onclick = async () => {
@@ -1251,15 +1972,20 @@ async function viewSales() {
                <button class="btn line block mt" id="aside">Set aside (keep a copy here)</button>` : ''}
              ${s.status === 'dismissed' ? `<div class="note">Set aside on ${esc(new Date(s.dismissedAt).toLocaleString())}. The server does not have this sale. It is kept here as a record.</div><button class="btn line block mt" id="retry">Try sending again</button>` : ''}
              ${s.review && s.review.length ? `<div class="note warn"><b>Recorded at the price shown on this phone</b><br>${s.review.map((r) => `${esc(r.name)}: charged ${inr(r.phonePrice)}, server menu now ${inr(r.serverPrice)}`).join('<br>')}<br><small>The customer paid what the phone showed, so the receipt was not changed. The server order carries a review note.</small></div>` : ''}
+             ${s.customer ? `<p class="mute">For ${esc([s.customer.name, s.customer.phone].filter(Boolean).join(' · '))}</p>` : ''}${s.staffName ? `<p class="mute">Taken by ${esc(s.staffName)}</p>` : ''}
              ${s.items.map((i) => `<div class="tot"><span>${i.quantity} &times; ${esc(i.name)}</span><span>${inr(i.price * i.quantity)}</span></div>`).join('')}
+             ${s.bill.serviceCharge ? `<div class="tot"><span>Service charge (optional)</span><span>${inr(s.bill.serviceCharge)}</span></div>` : ''}
              <div class="tot big mt"><span>Total</span><span>${inr(s.bill.total)}</span></div>
+             ${(s.collections || []).map((c) => `<div class="tot mute"><span>Collected ${esc(new Date(c.at).toLocaleDateString())} (${esc(METHOD_LABEL[c.method] || c.method)})</span><span>${inr(c.amount)}</span></div>`).join('')}
+             ${dueOf(s) > 0 ? `<div class="tot big" style="color:var(--warn)"><span>Still owed</span><span>${inr(dueOf(s))}</span></div><button class="btn block mt" id="collect">Collect payment</button>` : ''}
              ${refundedTotal(s, rfs) ? `<div class="tot" style="color:var(--bad)"><span>Refunded</span><span>&minus;${inr(refundedTotal(s, rfs))}</span></div>${rfs.filter((r) => r.saleId === s.id).map((r) => `<small class="mute">${esc(new Date(r.at).toLocaleString())} &middot; ${esc(METHOD_LABEL[r.method] || r.method)} &middot; ${r.lines.map((l) => `${l.qty} &times; ${esc(l.name)}`).join(', ')}${r.reason ? ` &middot; ${esc(r.reason)}` : ''}</small>`).join('<br>')}` : ''}
-             ${S.snap.local && refundableLines(s, rfs).some((l) => l.left > 0) ? '<button class="btn line block mt" id="refund">Refund…</button>' : ''}
+             ${dueOf(s) === 0 && s.status !== 'refused' && s.status !== 'dismissed' && refundableLines(s, rfs).some((l) => l.left > 0) ? '<button class="btn line block mt" id="refund">Refund…</button>' : ''}
              <div class="mt">${printActions()}</div>
            </div>`,
           (p) => {
             bindPrint(p, s, false);
             if (p.querySelector('#refund')) p.querySelector('#refund').onclick = () => refundSheet(s.id);
+            if (p.querySelector('#collect')) p.querySelector('#collect').onclick = () => collectSheet(s.id);
             const back = async () => (await refreshPending(), closeSheet(), render());
             if (p.querySelector('#retry')) p.querySelector('#retry').onclick = async () => ((await retrySale(s.id)), await back(), doSync());
             if (p.querySelector('#aside'))
@@ -1276,10 +2002,101 @@ async function viewSales() {
   );
 }
 
+// -------------------------------------------------------------- money owed ---
+async function duesSheet() {
+  const allSales = await sales.all();
+  const owed = dueSales(allSales);
+  const aging = agingBuckets(allSales);
+  // One customer, one line: the same phone number may owe on several bills.
+  const byCust = new Map();
+  for (const x of owed) {
+    const k = (x.customer && x.customer.phone) || x.id;
+    const g = byCust.get(k) || { name: (x.customer && x.customer.name) || '', phone: (x.customer && x.customer.phone) || '', bills: [] };
+    g.bills.push(x);
+    byCust.set(k, g);
+  }
+  openSheet(
+    `${head('Money owed')}
+     <div class="body">
+       ${owed.length ? `<div class="paycard" role="status"><div class="tot big due"><span>Total to collect</span><span>${inr(aging.total)}</span></div>
+         ${[['today', 'Today'], ['d1_30', '1 to 30 days'], ['d31_60', '31 to 60 days'], ['over60', 'Over 60 days']].filter(([k]) => aging[k] > 0).map(([k, l]) => `<div class="tot"><span>${l}</span><span>${inr(aging[k])}</span></div>`).join('')}</div>` : ''}
+       ${[...byCust.values()]
+         .map(
+           (g) => `<h3 style="margin:1rem 0 .2rem">${esc(g.name || g.phone)} <small class="mute">${esc(g.name ? g.phone : '')}</small> <span style="float:right">${inr(g.bills.reduce((n, b) => n + dueOf(b), 0))}</span></h3>
+           ${g.bills.map((b) => `<button class="row" style="width:100%;background:none;border:0;border-bottom:1px solid var(--line);text-align:left" data-c="${esc(b.id)}"><div class="grow"><b>${esc(b.localNumber)}</b><br><small>${esc(new Date(b.soldAt).toLocaleDateString())} &middot; bill ${inr(b.bill.total)}</small></div><b>${inr(dueOf(b))}</b></button>`).join('')}`,
+         )
+         .join('') || '<p class="mute center">Nobody owes anything.</p>'}
+     </div>`,
+    (p) => p.querySelectorAll('[data-c]').forEach((b) => (b.onclick = () => collectSheet(b.dataset.c))),
+  );
+}
+
+async function collectSheet(saleId, message, draft = {}) {
+  const sale = await sales.get(saleId);
+  const due = dueOf(sale);
+  const locked = !!draft.eventId; // a queued event already carries this payload
+  const method = draft.method || 'CASH';
+  openSheet(
+    `${head(`Collect on ${sale.localNumber}`)}
+     <div class="body">
+       ${message ? `<div class="note bad" role="alert">${esc(message)}</div>` : ''}
+       ${locked ? '<p class="note" role="status">Retrying the same payment that was already queued. Its amount and method cannot be changed.</p>' : ''}
+       <p>${esc([sale.customer && sale.customer.name, sale.customer && sale.customer.phone].filter(Boolean).join(' · '))}</p>
+       <div class="tot big"><span>Owed</span><span>${inr(due)}</span></div>
+       <label>Paid by</label><div class="seg" role="group" aria-label="Paid by">${Object.entries(METHOD_LABEL).map(([m, l]) => `<button type="button" data-m="${m}" aria-pressed="${method === m}"${locked ? ' disabled' : ''}>${l}</button>`).join('')}</div>
+       <label for="ca">Amount received (₹)</label><input id="ca" type="number" inputmode="decimal" min="0" step="0.01" value="${esc(draft.amount ?? due)}"${locked ? ' disabled' : ''}>
+       <label for="cr">Reference <span class="mute">(optional)</span></label><input id="cr" value="${esc(draft.reference || '')}" placeholder="UPI or card transaction id"${locked ? ' disabled' : ''}>
+     </div>
+     <footer><button class="btn block" id="go">Record payment</button></footer>`,
+    (p) => {
+      let m = method;
+      const guardKey = `collect:${saleId}`;
+      p.querySelectorAll('[data-m]').forEach((b) => (b.onclick = () => ((m = b.dataset.m), p.querySelectorAll('[data-m]').forEach((x) => x.setAttribute('aria-pressed', String(x === b))))));
+      if (moneyGuards.get(guardKey)) {
+        p.querySelector('#go').disabled = true;
+        p.querySelector('footer').insertAdjacentHTML('afterbegin', '<p class="note" role="status">A payment for this bill is still being recorded.</p>');
+      }
+      p.querySelector('#go').onclick = async () => {
+        if (!acquireMoneyGuard(guardKey)) return;
+        p.querySelector('#go').disabled = true;
+        // Capture submitted values before any await; the sheet may close.
+        const keep = locked
+          ? { method: draft.method, amount: draft.amount, reference: draft.reference, eventId: draft.eventId }
+          : { method: m, amount: $('ca').value, reference: $('cr').value, eventId: draft.eventId };
+        try {
+          const fresh = await sales.get(saleId); // never collect twice on a stale copy
+          const c = buildCollection({ id: newId(), sale: fresh, method: keep.method, amount: keep.amount, reference: keep.reference });
+          if (!S.snap.local && fresh.status === 'synced' && !keep.eventId) {
+            const ev = await queueEvent('collect', { saleId: fresh.id, payments: [{ method: c.method, amount: c.amount, ...(c.tendered ? { tendered: c.tendered } : {}), ...(c.reference ? { reference: c.reference } : {}) }] }, { userId: S.snap.user.id, deviceId: await kv.get('deviceId') });
+            c.eventId = ev.id;
+            keep.eventId = ev.id; // reuse on a retry after a failed local write
+          } else if (keep.eventId) {
+            c.eventId = keep.eventId;
+          }
+          if (S.who) c.by = S.who.name;
+          fresh.collections = [...(fresh.collections || []), c];
+          await sales.put(fresh);
+          booksDirty = true;
+          toast(`${inr(c.amount)} received${c.change ? `, give change ${inr(c.change)}` : ''}.${dueOf(fresh) > 0 ? ` Still owed ${inr(dueOf(fresh))}.` : ' Bill fully paid.'}`, 4500);
+          closeSheet();
+          render();
+          if (!S.snap.local) gatedSync({ refreshMenu: false });
+        } catch (e) {
+          p.querySelector('#go').disabled = false;
+          collectSheet(saleId, e.message, keep);
+        } finally {
+          releaseMoneyGuard(guardKey);
+        }
+      };
+    },
+  );
+}
+
 // ------------------------------------------------------------------- books ---
-// Refunds, expenses, closing the day, reports, export and backup. All of it is
-// kept on this phone; none of it is sent to a server (the server has no
-// endpoint for it), and the screens say so.
+// Refunds, expenses, closing the day, reports, export and backup. On a phone
+// account it all stays on the phone; on a server-linked phone refunds,
+// expenses, money collected later and the day's cash count are also sent to
+// the server (lib/journal.js, each safe to resend).
 const fmtDay = (key) => new Date(`${key}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
 const stamp = () => new Date().toISOString().slice(0, 10);
 const slug = () => String(S.snap.branch.name || 'orderrestro').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'orderrestro';
@@ -1324,7 +2141,7 @@ function booksMenu() {
        <button class="btn line block mt" data-b="csv">Share sales as a spreadsheet</button>
        ${S.snap.local ? `<button class="btn line block mt" data-b="backup">Back up everything</button>
        <button class="btn line block mt" data-b="restore">Restore from a backup</button>` : ''}
-       <p class="mute mt">Refunds, expenses and cash counts are kept on this phone. ${S.snap.local ? 'Back up often: if the phone is lost or its data cleared, a backup is the only copy.' : 'They are not sent to the server.'}</p>
+       <p class="mute mt">${S.snap.local ? 'Refunds, expenses and cash counts are kept on this phone. It saves a backup by itself once a day (see Sync); copy those files off the phone now and then.' : 'Refunds, expenses, money collected later and the day\'s cash count are sent to the server as well.'}</p>
      </div>`,
     (p) => {
       const go = { expenses: expensesSheet, close: closeDaySheet, report: reportSheet, csv: shareCsv, backup: shareBackup, restore: restoreSheet };
@@ -1361,6 +2178,14 @@ function restoreSheet(message) {
         try {
           const b = parseBackup(await f.text());
           if (!confirm(`Replace everything on this phone with the backup from ${new Date(b.savedAt).toLocaleString()}? It has ${b.sales.length} sale${b.sales.length === 1 ? '' : 's'}.`)) return;
+          if (!(await managerOK('Restore a backup (replaces everything on this phone).'))) return;
+          // Refuse to restore a backup from a different restaurant/branch onto this phone.
+          if (b.snapshot && S.snap &&
+              (b.snapshot.branch?.name || b.snapshot.branch?.id) &&
+              (S.snap.branch?.name || S.snap.branch?.id) &&
+              (b.snapshot.branch.name !== S.snap.branch.name || b.snapshot.branch.id !== S.snap.branch.id)) {
+            return restoreSheet(`This backup is from a different restaurant/branch ("${esc(b.snapshot.branch.name || '')}") than this phone ("${esc(S.snap.branch.name || '')}"). Restoring it would scramble your menu and sales.`);
+          }
           b.snapshot.local = true; // a backup restores a phone account, never a server menu
           await replaceEverything(b);
           booksDirty = true;
@@ -1404,7 +2229,13 @@ async function expensesSheet(message, draft = {}) {
       p.querySelectorAll('[data-m]').forEach((b) => (b.onclick = () => ((method = b.dataset.m), p.querySelectorAll('[data-m]').forEach((x) => x.setAttribute('aria-pressed', String(x === b))))));
       p.querySelector('#add').onclick = async () => {
         try {
-          await expenses.put(buildExpense({ id: newId(), ...grab() }));
+          const e = buildExpense({ id: newId(), ...grab() });
+          if (S.who) e.by = S.who.name;
+          if (!S.snap.local) {
+            const ev = await queueEvent('expense', { spentOn: today(), note: e.note, category: e.category || undefined, amount: e.amount, paidFromCash: e.method === 'CASH' }, { userId: S.snap.user.id, deviceId: await kv.get('deviceId') });
+            e.eventId = ev.id;
+          }
+          await expenses.put(e);
           booksDirty = true;
           toast('Expense added');
           expensesSheet();
@@ -1415,7 +2246,12 @@ async function expensesSheet(message, draft = {}) {
       p.querySelectorAll('[data-del]').forEach(
         (b) =>
           (b.onclick = async () => {
+            const e = list.find((x) => x.id === b.dataset.del);
+            const ev = e && e.eventId ? await events.get(e.eventId) : null;
+            if (ev && ev.status === 'synced') return toast('This expense is already on the server. Ask the owner to delete it there (Accounting).', 5000);
             if (!confirm('Delete this expense? It leaves the books.')) return;
+            if (!(await managerOK('Delete an expense.'))) return;
+            if (ev) await events.del(ev.id); // never sent: drop it from the queue too
             await expenses.del(b.dataset.del);
             booksDirty = true;
             expensesSheet();
@@ -1446,11 +2282,14 @@ async function closeDaySheet(message, draft = {}) {
          ${books.refundTotal ? line('Refunds', `&minus;${inr(books.refundTotal)}`) : ''}
          ${line('Net sales', `<b>${inr(books.net)}</b>`)}
          ${Object.entries(books.byMethod).filter(([, v]) => v).map(([m, v]) => line(METHOD_LABEL[m], inr(v))).join('')}
+         ${books.collected ? line('<small>of which collected on owed bills</small>', `<small>${inr(books.collected)}</small>`) : ''}
+         ${books.dueToday ? line('Still owed on today\'s bills', inr(books.dueToday)) : ''}
+         ${books.serviceCharge ? line('Service charge (optional)', inr(books.serviceCharge)) : ''}
          ${books.expenseTotal ? line('Expenses', `&minus;${inr(books.expenseTotal)}`) : ''}
          ${line('Left after expenses', `<b>${inr(books.profit)}</b>`)}
        </dl>
        <div class="tot big mt"><span>Cash that should be there</span><span>${inr(books.expectedCash)}</span></div>
-       <p class="mute" style="margin:.2rem 0 0">Opening cash + cash sales &minus; cash refunds &minus; cash expenses.</p>
+       <p class="mute" style="margin:.2rem 0 0">Opening cash + cash taken (sales and money collected) &minus; cash refunds &minus; cash expenses.</p>
        <label for="cc">Cash you counted (₹)</label><input id="cc" type="number" inputmode="decimal" min="0" step="0.01" value="${esc(draft.counted ?? (done ? done.countedCash : ''))}">
        ${done ? `<div class="note warn">This day was closed at ${esc(new Date(done.closedAt).toLocaleTimeString())}. Closing again replaces that count.</div>` : ''}
        <button class="btn block mt" id="close">${done ? 'Close again' : 'Close the day'}</button>
@@ -1464,11 +2303,20 @@ async function closeDaySheet(message, draft = {}) {
       p.querySelector('#close').onclick = async () => {
         try {
           await kv.set(`float:${day}`, $('fl').value);
-          const rec = closeDay({ books: dayBooks({ ...b, float: Number($('fl').value) || 0, day }), counted: $('cc').value });
+          const bk = dayBooks({ ...b, float: Number($('fl').value) || 0, day });
+          const rec = closeDay({ books: bk, counted: $('cc').value });
+          if (!(await managerOK('Close the day (count the cash).'))) return;
+          rec.by = S.who ? S.who.name : S.snap.user.name;
+          if (!S.snap.local) {
+            // This phone's own drawer, kept on the server per phone and day (a later count replaces it).
+            await queueEvent('tillclose', { deviceId: await kv.get('deviceId'), deviceName: (await kv.get('deviceName')) || 'Phone', businessDate: day, openingFloat: Number($('fl').value) || 0, cashSales: bk.cashIn, cashRefunds: bk.refundCash, cashExpenses: bk.expenseCash, expectedCash: bk.expectedCash, countedCash: rec.countedCash, netSales: bk.net, closedByName: rec.by, closedAt: rec.closedAt }, { userId: S.snap.user.id, deviceId: await kv.get('deviceId') });
+          }
           await shifts.put(rec);
           booksDirty = true;
           const word = rec.difference === 0 ? 'The cash matches.' : rec.difference < 0 ? `Cash is short by ${inr(-rec.difference)}.` : `Cash is over by ${inr(rec.difference)}.`;
           toast(`Day closed. ${word}`, 5000);
+          autoBackup(true);
+          if (!S.snap.local) gatedSync({ refreshMenu: false });
           closeDaySheet();
         } catch (e) {
           closeDaySheet(e.message, { float: $('fl').value, counted: $('cc').value });
@@ -1509,21 +2357,27 @@ async function refundSheet(saleId, message, draft = {}) {
   const lines = refundableLines(sale, rs).filter((l) => l.left > 0);
   const method = draft.method || (sale.payments[0] && sale.payments[0].method) || 'CASH';
   const qty = draft.qty || {};
+  const locked = !!draft.eventId; // queued refund: keep its exact payload on retry
   openSheet(
     `${head(`Refund ${sale.localNumber}`)}
      <div class="body">
        ${message ? `<div class="note bad" role="alert">${esc(message)}</div>` : ''}
+       ${locked ? '<p class="note" role="status">Retrying the same refund that was already queued. Its lines and method cannot be changed.</p>' : ''}
        ${lines.length ? lines.map((l) => `<div class="row"><div class="grow"><b>${esc(l.item.name)}</b><br><small>${inr(l.item.price)} &middot; up to ${l.left}</small></div>
-          <input type="number" inputmode="numeric" min="0" max="${l.left}" step="1" data-q="${l.index}" value="${esc(qty[l.index] ?? '')}" placeholder="0" aria-label="How many ${esc(l.item.name)} to refund" style="width:5rem"></div>`).join('') : '<p class="mute center">Everything on this sale is already refunded.</p>'}
-       <label>Paid back by</label><div class="seg" role="group" aria-label="Paid back by">${Object.entries(METHOD_LABEL).map(([m, l]) => `<button data-m="${m}" aria-pressed="${method === m}">${l}</button>`).join('')}</div>
-       <label for="rr">Reason <span class="mute">(optional)</span></label><input id="rr" value="${esc(draft.reason || '')}" placeholder="Wrong dish, cold food…">
+          <input type="number" inputmode="numeric" min="0" max="${l.left}" step="1" data-q="${l.index}" value="${esc(qty[l.index] ?? '')}" placeholder="0" aria-label="How many ${esc(l.item.name)} to refund" style="width:5rem"${locked ? ' disabled' : ''}></div>`).join('') : '<p class="mute center">Everything on this sale is already refunded.</p>'}
+       <label>Paid back by</label><div class="seg" role="group" aria-label="Paid back by">${Object.entries(METHOD_LABEL).map(([m, l]) => `<button data-m="${m}" aria-pressed="${method === m}"${locked ? ' disabled' : ''}>${l}</button>`).join('')}</div>
+       <label for="rr">Reason <span class="mute">(optional)</span></label><input id="rr" value="${esc(draft.reason || '')}" placeholder="Wrong dish, cold food…"${locked ? ' disabled' : ''}>
        <div class="tot big mt"><span>Pay back</span><span id="amt">${inr(0)}</span></div>
-       <p class="mute">Recorded in this phone's books and taken off the day's sales. ${S.snap.local ? 'Dishes are not put back into stock.' : ''}</p>
+       <p class="mute">Recorded in this phone's books and taken off the day's sales.${S.snap.local ? ' Dishes are not put back into stock.' : ' It goes to the server too (money only; stock is not put back).'}</p>
      </div>
      <footer><button class="btn block" id="go" ${lines.length ? '' : 'disabled'}>Refund</button></footer>`,
     (p) => {
       let m = method;
-      const picks = () => [...p.querySelectorAll('[data-q]')].map((i) => ({ index: Number(i.dataset.q), qty: Number(i.value) || 0 }));
+      const guardKey = `refund:${saleId}`;
+      const picks = () =>
+        locked
+          ? Object.entries(draft.qty || {}).map(([index, q]) => ({ index: Number(index), qty: Number(q) || 0 }))
+          : [...p.querySelectorAll('[data-q]')].map((i) => ({ index: Number(i.dataset.q), qty: Number(i.value) || 0 }));
       const preview = () => {
         try {
           $('amt').textContent = inr(buildRefund({ id: 'x', sale, refunds: rs, picks: picks() }).amount);
@@ -1533,18 +2387,53 @@ async function refundSheet(saleId, message, draft = {}) {
       };
       p.querySelectorAll('[data-q]').forEach((i) => (i.oninput = preview));
       p.querySelectorAll('[data-m]').forEach((b) => (b.onclick = () => ((m = b.dataset.m), p.querySelectorAll('[data-m]').forEach((x) => x.setAttribute('aria-pressed', String(x === b))))));
+      if (moneyGuards.get(guardKey)) {
+        p.querySelector('#go').disabled = true;
+        p.querySelector('footer').insertAdjacentHTML('afterbegin', '<p class="note" role="status">A refund for this bill is still being recorded.</p>');
+      }
       p.querySelector('#go').onclick = async () => {
-        const keep = () => ({ method: m, reason: $('rr').value, qty: Object.fromEntries(picks().map((x) => [x.index, x.qty || ''])) });
+        if (!acquireMoneyGuard(guardKey)) return;
+        p.querySelector('#go').disabled = true;
+        const keep = () => locked
+          ? { ...draft }
+          : { method: m, reason: $('rr').value, qty: Object.fromEntries(picks().map((x) => [x.index, x.qty || ''])), eventId: draft.eventId };
+        const submitted = keep();
         try {
-          const r = buildRefund({ id: newId(), sale, refunds: rs, picks: picks(), method: m, reason: $('rr').value });
-          if (!confirm(`Pay back ${inr(r.amount)} by ${METHOD_LABEL[m]}?`)) return;
+          const latest = await refunds.all(); // read under the guard
+          const r = buildRefund({ id: newId(), sale, refunds: latest, picks: picks(), method: submitted.method, reason: submitted.reason });
+          const cancel = () => {
+            const b = p.querySelector('#go');
+            if (b) b.disabled = false;
+          };
+          if (!confirm(`Pay back ${inr(r.amount)} by ${METHOD_LABEL[m]}?`)) {
+            cancel();
+            return releaseMoneyGuard(guardKey);
+          }
+          if (!(await managerOK(`Refund ${inr(r.amount)} on ${sale.localNumber}.`))) {
+            cancel();
+            return releaseMoneyGuard(guardKey);
+          }
+          if (S.who) r.by = S.who.name;
+          if (!S.snap.local && !submitted.eventId) {
+            // Sent to the server as a money-only refund once the server has the sale (see sync.js).
+            const ev = await queueEvent('refund', { saleId: sale.id, amount: r.amount, method: r.method, reason: r.reason || undefined }, { userId: S.snap.user.id, deviceId: await kv.get('deviceId') });
+            r.eventId = ev.id;
+            submitted.eventId = ev.id; // reuse if the local write fails
+          } else if (submitted.eventId) {
+            r.eventId = submitted.eventId;
+          }
           await refunds.put(r);
           booksDirty = true;
           toast(`Refunded ${inr(r.amount)}`);
           closeSheet();
           render();
         } catch (e) {
-          refundSheet(saleId, e.message, keep());
+          const b = p.querySelector('#go');
+          if (b) b.disabled = false;
+          if (p.isConnected) refundSheet(saleId, e.message, submitted);
+          else toast(`Refund could not be saved: ${e.message}`, 5000);
+        } finally {
+          releaseMoneyGuard(guardKey);
         }
       };
       preview();
@@ -1557,6 +2446,8 @@ const REFUSAL_TITLE = {
   ALREADY_STARTED: 'The server already has an unfinished copy',
   PRICE_CONFLICT: 'Two prices for the same dish',
   PAYMENT_REJECTED: 'The server did not accept the payment or discount',
+  DISCOUNT_NOT_ALLOWED: 'This account may not give that discount',
+  SALE_TOO_OLD: 'This sale is too old to add automatically',
   OTHER: 'The server did not accept this sale',
 };
 const REFUSAL_HELP = {
@@ -1564,6 +2455,8 @@ const REFUSAL_HELP = {
   ALREADY_STARTED: 'Ask the owner to check Orders for this sale, then try again or set it aside.',
   PRICE_CONFLICT: 'Set it aside and enter it again from the full app.',
   PAYMENT_REJECTED: 'Ask the owner to check the discount limit or payment, then try again.',
+  DISCOUNT_NOT_ALLOWED: 'Ask a manager to enter this sale, or sign in with an account that may give discounts.',
+  SALE_TOO_OLD: 'Check this phone\'s date and time, then ask the owner to enter the sale by hand.',
   OTHER: 'Ask the owner, then try again or set it aside.',
 };
 
@@ -1581,6 +2474,77 @@ async function serverCards() {
     .join('<hr style="border:0;border-top:1px solid var(--line)">')}
     <p class="mute">The local address needs this phone on the restaurant WiFi. The online address works from anywhere.</p></div>`;
 }
+
+// ------------------------------------------------------------ shop settings ---
+const BOOK_KIND = { refund: 'Refund', expense: 'Expense', collect: 'Money collected', tillclose: 'Day cash count' };
+
+/** The Settings card on the Sync tab: staff and PINs, the voluntary service charge, and the automatic backup. */
+async function settingsCard() {
+  const info = await kv.get('autoBackupInfo');
+  const np = plugins().NativePrinter;
+  const auto = np && np.saveBackup;
+  const refused = (await events.all()).filter((e) => BOOK_KIND[e.kind] && e.status === 'failed');
+  return `${refused.length ? `<div class="card mt"><h2 style="font-size:1.05rem">Refused by the server</h2>${refused
+      .map((e) => `<div class="row"><div class="grow"><b>${BOOK_KIND[e.kind]}</b>${e.payload.amount ? ` ${inr(e.payload.amount || e.payload.countedCash || 0)}` : ''}<br><small class="mute">${esc(new Date(e.createdAt).toLocaleString())}</small><div class="note bad">${esc(e.error || 'Refused')}</div></div><div><button class="btn ghost" data-evretry="${esc(e.id)}">Try again</button><button class="btn line mt" data-evaside="${esc(e.id)}">Set aside</button></div></div>`)
+      .join('')}</div>` : ''}
+    ${!S.snap.local && !can('offlineOptions') ? `<div class="note warn mt" role="status">Your server${S.caps.version && S.caps.version !== 'unknown' ? ` (version ${esc(S.caps.version)})` : ''} is older than this app. Pay later, the service charge, half portions and add-ons, and sending refunds, expenses and cash counts need OrderRestro server 1.38 or newer. Refunds and expenses stay on this phone and are sent once the server is updated.</div>` : ''}
+    <div class="card mt">
+      <h2 style="font-size:1.05rem">Shop settings</h2>
+      <button class="btn line block" id="st-staff">Staff &amp; PINs${S.staff.length ? ` (${S.staff.filter((p) => p.active !== false).length})` : ''}</button>
+      <label for="st-sc" class="mt">Service charge offered (%)</label>
+      <input id="st-sc" type="number" inputmode="decimal" min="0" max="25" step="0.5" value="${S.scPct || ''}" placeholder="0 = off">
+      <small class="mute">Never added by itself: the cashier ticks it only when the guest agrees (it cannot be compulsory). It reaches the server as a tip.</small>
+      <h3 style="margin:1rem 0 .2rem;font-size:.95rem">Automatic backup</h3>
+      <p class="mute" style="margin:0">${auto ? (info ? `Last saved ${esc(new Date(info.at).toLocaleString())} to <b>${esc(info.location)}</b>${info.survivesUninstall ? '' : ' (removed if the app is uninstalled: copy it off the phone)'}.` : 'Saves everything once a day to Download/OrderRestro on this phone (the last 7 days are kept).') : 'Works in the OrderRestro app.'}</p>
+      ${auto ? '<button class="btn ghost block mt" id="st-bk">Back up now</button>' : ''}
+    </div>`;
+}
+function bindSettings(redraw) {
+  if ($('st-staff')) $('st-staff').onclick = () => staffSheet();
+  const sc = $('st-sc');
+  if (sc)
+    sc.onchange = async () => {
+      const v = Math.min(Math.max(Number(sc.value) || 0, 0), 25);
+      if (v !== S.scPct && !(await managerOK('Change the service charge.'))) return (sc.value = S.scPct || '');
+      S.scPct = v;
+      await kv.set('serviceChargePct', v);
+      toast(v ? `Service charge ${v}% will be offered at the till.` : 'Service charge switched off.');
+    };
+  if ($('st-bk')) $('st-bk').onclick = async () => ((await autoBackup(true)) ? toast('Backup saved') : null, redraw());
+  document.querySelectorAll('[data-evretry]').forEach((b) => (b.onclick = async () => (await retryEvent(b.dataset.evretry), gatedSync({ refreshMenu: false }), redraw())));
+  document.querySelectorAll('[data-evaside]').forEach(
+    (b) =>
+      (b.onclick = async () => {
+        if (!confirm('Set this record aside? It stays on this phone but is not sent to the server.')) return;
+        await dismissEvent(b.dataset.evaside);
+        redraw();
+      }),
+  );
+}
+
+/**
+ * Once a day (and after closing the day) the whole phone is saved as a JSON file to Download/OrderRestro, so a lost
+ * or cleared phone is not the only copy. Never contains the password or the staff PINs.
+ */
+async function autoBackup(force = false) {
+  const np = plugins().NativePrinter;
+  if (!np || !np.saveBackup || !S.snap) return false;
+  const day = today();
+  if (!force && (await kv.get('autoBackupDay')) === day) return false;
+  try {
+    const data = await readEverything();
+    if (!force && !data.sales.length && !data.orders.length) return false; // nothing worth saving yet
+    const r = await np.saveBackup({ name: `orderrestro-auto-${slug()}-${day}.json`, prefix: 'orderrestro-auto-', text: backupJson(data), keep: 7 });
+    await kv.set('autoBackupDay', day);
+    await kv.set('autoBackupInfo', { at: Date.now(), location: r.location, survivesUninstall: !!r.survivesUninstall });
+    await kv.set('lastBackupAt', Date.now());
+    return true;
+  } catch (e) {
+    if (force) toast(e.message || 'Could not save the backup', 5000);
+    return false;
+  }
+}
+setInterval(() => autoBackup(), 60 * 60000);
 
 // -------------------------------------------------------------------- sync ---
 async function viewSyncLocal() {
@@ -1602,11 +2566,104 @@ async function viewSyncLocal() {
       <p class="mute">${printer ? `Printing on <b>${esc(printer.name)}</b>` : 'No printer chosen yet.'}</p>
       <button class="btn ghost block" id="pick">${printer ? 'Change printer' : 'Choose printer'}</button>
     </div>
+    ${await settingsCard()}
     <div class="card mt"><button class="btn line block" id="lock">Lock</button><button class="btn line block mt" id="chpw">Change password</button></div>`;
+  bindSettings(viewSync);
   $('chpw').onclick = () => passwordSheet();
   $('conn').onclick = () => connectSheet();
   $('pick').onclick = async () => (await choosePrinter(), viewSync());
-  $('lock').onclick = async () => (await flushPersist(), (S.unlocked = false), (S.cart = new Map()), (S.orderId = null), (S.restored = false), render());
+  $('lock').onclick = async () => (await flushPersist(), (S.unlocked = false), (S.ownerUnlock = false), (S.who = null), (S.cart = new Map()), (S.orderId = null), (S.restored = false), render());
+}
+
+
+// ---- Nearby phones (phone-to-phone, no WiFi or internet) -------------------------------------------------------
+// See lib/nearby.js for what travels and why. Android app only; needs Google Play services.
+let nearby = null;
+let nearbyTimer = null;
+let nearbyReady = null; // { supported, permission }
+function nearbyTransport() {
+  const np = plugins().Nearby;
+  const wrap = (m) => (a) => np[m](a || {});
+  return {
+    start: wrap('start'), stop: wrap('stop'), connect: wrap('connect'), accept: wrap('accept'),
+    reject: wrap('reject'), disconnect: wrap('disconnect'), send: wrap('send'),
+    on: (ev, fn) => {
+      const h = np.addListener(ev, fn);
+      return () => Promise.resolve(h).then((x) => x && x.remove && x.remove());
+    },
+  };
+}
+function nearbySession() {
+  if (!nearby)
+    nearby = createSession({
+      transport: nearbyTransport(),
+      peerSales,
+      ownSales: sales,
+      acks: nearbyAcks,
+      me: () => ({ deviceId: nearbyDeviceId, name: nearbyName, branchId: S.snap && !S.snap.local ? S.snap.branch.id : '' }),
+      onChange: () => paintNearby(),
+    });
+  return nearby;
+}
+let nearbyDeviceId = '';
+let nearbyName = 'Phone';
+async function paintNearby() {
+  const box = $('nearby');
+  if (!box || S.view !== 'sync') return;
+  const np = plugins().Nearby;
+  if (!np) {
+    box.innerHTML = `<h2 style="font-size:1.05rem">Nearby phones</h2><p class="mute">Sharing sales with a phone next to you works in the OrderRestro Android app.</p>`;
+    return;
+  }
+  const peers = nearby ? nearby.peers() : [];
+  const held = (await peerSales.all()).filter((r) => r.status === 'held').length;
+  const acks = await nearbyAcks.get();
+  const mine = (await sales.all()).filter((x) => x.status === 'pending');
+  const alsoHeld = mine.filter((x) => (acks[x.id] || []).length).length;
+  const row = (p) =>
+    p.state === 'verify'
+      ? `<div class="card mt"><b>${esc(p.name)}</b><p class="mute">Check that <b>both phones show this code</b>:</p><p class="center" style="font-size:2rem;letter-spacing:.3em;font-weight:700">${esc(p.code)}</p><button class="btn block" data-nconfirm="${esc(p.id)}">Yes, same code</button><button class="btn line block mt" data-ndeny="${esc(p.id)}">No, different</button></div>`
+      : `<div class="mt"><b>${esc(p.name)}</b> <span class="mute">${p.state === 'ready' ? `connected · sent ${p.sent} · received ${p.received}` : p.state === 'connected' ? 'checking…' : p.state === 'refused' ? 'different restaurant branch' : 'found'}</span>${p.state === 'found' ? ` <button class="btn ghost" data-nconnect="${esc(p.id)}">Connect</button>` : ''}</div>`;
+  const log = nearby ? nearby.log().slice(0, 3) : [];
+  box.innerHTML = `
+    <h2 style="font-size:1.05rem">Nearby phones</h2>
+    <p class="mute">Phones of this restaurant can keep a copy of each other's finished sales with no WiFi or internet, so a sale is not only on one phone. It is <b>not</b> on the server until a phone syncs. Keep this screen open on both phones.</p>
+    <dl class="kv">
+      <dt>Your waiting sales also saved on another phone</dt><dd>${alsoHeld} of ${mine.length}</dd>
+      <dt>Held for other phones, not on the server yet</dt><dd>${held}</dd>
+    </dl>
+    ${nearby && nearbyTimer ? `${peers.map(row).join('') || '<p class="mute mt">Looking for phones…</p>'}<button class="btn line block mt" id="nstop">Stop looking</button>` : `<button class="btn ghost block mt" id="nstart">Look for nearby phones</button>`}
+    ${log.map((l) => `<p class="mute">${esc(l.text)}</p>`).join('')}`;
+  const st = $('nstart');
+  if (st) st.onclick = startNearby;
+  const sp = $('nstop');
+  if (sp) sp.onclick = stopNearby;
+  box.querySelectorAll('[data-nconnect]').forEach((b) => (b.onclick = () => nearby.connect(b.dataset.nconnect).catch((e) => toast(e.message || 'Could not connect'))));
+  box.querySelectorAll('[data-nconfirm]').forEach((b) => (b.onclick = () => nearby.confirm(b.dataset.nconfirm).catch((e) => toast(e.message || 'Could not accept'))));
+  box.querySelectorAll('[data-ndeny]').forEach((b) => (b.onclick = () => nearby.deny(b.dataset.ndeny)));
+}
+async function startNearby() {
+  const np = plugins().Nearby;
+  try {
+    nearbyDeviceId = (await kv.get('deviceId')) || '';
+    nearbyName = (await kv.get('deviceName')) || 'Phone';
+    nearbyReady = await np.status();
+    if (!nearbyReady.supported) return toast('This phone has no Google Play services, so Nearby cannot be used.', 5000);
+    if (nearbyReady.permission !== 'granted') nearbyReady = await np.requestAccess();
+    if (nearbyReady.permission !== 'granted') return toast('Allow "Nearby devices" to find other phones.', 5000);
+    await nearbySession().start();
+    clearInterval(nearbyTimer);
+    nearbyTimer = setInterval(() => nearby && nearby.tick().catch(() => {}), 5000);
+  } catch (e) {
+    toast(e && e.message ? e.message : 'Could not start Nearby', 5000);
+  }
+  paintNearby();
+}
+async function stopNearby() {
+  clearInterval(nearbyTimer);
+  nearbyTimer = null;
+  if (nearby) await nearby.stop().catch(() => {});
+  paintNearby();
 }
 
 async function viewSync() {
@@ -1622,16 +2679,18 @@ async function viewSync() {
     <div class="card mt">
       <dl class="kv">
         <dt>Connection</dt><dd>${S.online ? 'Online' : 'Offline'}</dd>
-        <dt>Waiting to send</dt><dd>${S.pending} sale${S.pending === 1 ? '' : 's'}</dd>
+        <dt>Waiting to send</dt><dd>${esc(waitingText())}</dd>
         <dt>Last sync</dt><dd>${last ? esc(new Date(last).toLocaleString()) : 'Never'}</dd>
-        <dt>Menu saved</dt><dd>${snapAt ? esc(new Date(snapAt).toLocaleString()) : 'Never'} (${S.snap.items.length} dishes)</dd>
+        <dt>Menu saved</dt><dd>${snapAt ? esc(new Date(snapAt).toLocaleString()) : 'Never'} (${S.snap.items.length} dishes)${snapAt && Date.now() - snapAt > 86400000 ? '<br><b>Older than a day. Connect and tap Sync now so prices are current.</b>' : ''}</dd>
         <dt>Signed in as</dt><dd>${esc(S.snap.user.name)}</dd>
         <dt>This phone</dt><dd>${esc(device)}</dd>
       </dl>
       <button class="btn block mt" id="syncnow" ${S.syncing ? 'disabled' : ''}>${S.syncing ? 'Syncing…' : 'Sync now'}</button>
-      <p class="mute center">Sync sends your sales and refreshes the menu and prices.</p>
+      <p class="mute center">Sync sends your sales, kitchen records and bookings, and refreshes the menu and prices.</p>
     </div>
     ${servers}
+    ${await settingsCard()}
+    <div class="card mt" id="nearby"></div>
     <div class="card mt">
       <h2 style="font-size:1.05rem">Bluetooth printer</h2>
       <p class="mute">${printer ? `Printing on <b>${esc(printer.name)}</b>` : 'No printer chosen yet.'}</p>
@@ -1642,6 +2701,8 @@ async function viewSync() {
       <button class="btn line block mt" id="out">${S.hasPhoneAccount ? 'Disconnect and go back to my phone account' : 'Sign out of standalone mode'}</button>
     </div>`;
   $('syncnow').onclick = doSync;
+  bindSettings(viewSync);
+  paintNearby();
   $('pick').onclick = async () => (await choosePrinter(), viewSync());
   $('full').onclick = async () => {
     const link = plugins().ServerLink;
@@ -1649,8 +2710,9 @@ async function viewSync() {
     else location.href = '../index.html?stay=1';
   };
   $('out').onclick = async () => {
-    const waiting = (await sales.pending()).length;
-    if (waiting && !confirm(`${waiting} sale(s) are not on the server yet. Signing out keeps them on this phone, but they cannot be sent until you sign in again. Sign out anyway?`)) return;
+    await refreshPending();
+    const waiting = S.pending + S.pendingEvents + S.failedEvents + S.pendingBookings + (S.pendingBooks || 0) + (S.failedBooks || 0);
+    if (waiting && !confirm(`Not on the server yet: ${waitingText()}${S.failedEvents ? `, and ${S.failedEvents} refused kitchen record${S.failedEvents === 1 ? '' : 's'}` : ''}. Signing out keeps them on this phone, but they cannot be sent until you sign in again. Sign out anyway?`)) return;
     const back = S.hasPhoneAccount && (await kv.get('localMenuBackup'));
     if (back) {
       // Signed up on this phone, then connected: go back to the phone account (its menu and sales stay).
@@ -1672,18 +2734,31 @@ async function viewSync() {
   };
 }
 
-function afterSync(r) {
+function afterSync(r, opts) {
   S.syncing = false;
   S.online = r.online;
-  if (r.authExpired) S.note = { kind: 'warn', text: 'Your sign-in has expired. Selling still works. Sign out and sign in again to send the sales.' };
+  if (r.revoked) S.note = { kind: 'bad', text: 'The owner removed this phone from the restaurant. Sales and kitchen records stay on this phone but cannot be sent until the owner allows it again.' };
+  else if (r.authExpired) S.note = { kind: 'warn', text: 'Your sign-in has expired. Selling still works. Sign out and sign in again to send the sales.' };
   else if (r.error) S.note = { kind: 'bad', text: r.error };
   else if (r.online) {
     S.note = r.done ? { text: `${r.done} sale${r.done > 1 ? 's' : ''} sent to the server.` } : null;
     if (r.reviewed) S.note = { kind: 'warn', text: `${r.reviewed} sale${r.reviewed > 1 ? 's were' : ' was'} recorded at a price that differs from the server menu. Open Sales to check.` };
+    if (r.eventsFailed) S.note = { kind: 'bad', text: `${r.eventsFailed} record${r.eventsFailed > 1 ? 's were' : ' was'} refused by the server (kitchen, refunds, expenses or cash). Open Sync to read why and try again.` };
     if (r.refused) S.note = { kind: 'bad', text: `${r.refused} sale${r.refused > 1 ? 's were' : ' was'} refused by the server. Open Sales to retry or set aside.` };
   } else S.note = null;
-  kv.get('snapshot').then((s) => s && (S.snap = s));
-  if ($('sheet').hidden) render();
+  kv.get('snapshot').then(async (snap) => {
+    S.caps = (await kv.get('serverCaps')) || {};
+    if (snap) {
+      S.snap = snap;
+      await syncStaffFromServer();
+    }
+    if (!$('sheet').hidden || (opts?.refreshMenu === false && S.view === 'sell' && $('view')?.contains(document.activeElement))) {
+      refreshDishButtons();
+      checkPaymentPause?.();
+    } else {
+      render();
+    }
+  });
 }
 async function doSync() {
   S.syncing = true;
@@ -1698,21 +2773,678 @@ async function doSync() {
   }
 }
 
+// ----------------------------------------------------------------- kitchen ---
+// Production and waste are written on the phone first and sent when there is a connection. Nothing here
+// waits for the network, and an event is never sent twice (its id is the server's idempotency key).
+const kitchenOn = () => !!(S.snap && !S.snap.local && Array.isArray(S.snap.stockItems));
+const KIT_REASONS = [['SPOILED', 'Spoiled'], ['EXPIRED', 'Expired'], ['OVER_PRODUCTION', 'Over-prepared'], ['DAMAGED', 'Dropped / damaged'], ['RETURNED_PLATE', 'Returned / plate waste'], ['PREP_TRIM', 'Preparation trim'], ['STORAGE_TEMPERATURE', 'Temperature / storage'], ['OTHER', 'Other']];
+const EV_LABEL = { pending: 'Waiting to send', synced: 'Sent', failed: 'Needs attention', dismissed: 'Set aside' };
+const unitOpts = (it, sel) => (it ? it.units : []).map((u) => `<option ${u === sel ? 'selected' : ''}>${u}</option>`).join('');
+const itemOpts = (list) => `<option value="">Choose…</option>${list.map((i) => `<option value="${esc(i.id)}">${esc(i.name)}</option>`).join('')}`;
+
+async function viewKitchen() {
+  const evs = (await events.all()).filter((e) => e.kind !== 'attendance' && !BOOK_KIND[e.kind]).slice(0, 40);
+  const nameOf = (id) => (S.snap.stockItems.find((i) => i.id === id) || {}).name || 'Item';
+  const placeOf = (id) => ((S.snap.stockPlaces || []).find((p) => p.id === id) || {}).name || 'another place';
+  const describe = (e) =>
+    e.kind === 'production'
+      ? `Made ${e.payload.outputs.map((o) => `${o.quantity} ${o.unit} ${nameOf(o.ingredientId)}`).join(', ')}`
+      : e.kind === 'receipt'
+        ? `Received ${e.payload.quantity} ${e.payload.unit} ${nameOf(e.payload.ingredientId)}`
+        : e.kind === 'transfer'
+          ? `Moved ${e.payload.lines.map((l) => `${l.quantity} ${l.unit} ${nameOf(l.ingredientId)}`).join(', ')} to ${placeOf(e.payload.lines[0].toLocationId)}`
+          : e.kind === 'correction'
+            ? `Correction: ${e.payload.lines.map((l) => `${l.direction === 'IN' ? '+' : '-'}${l.quantity} ${l.unit} ${nameOf(l.ingredientId)}`).join(', ')}`
+        : `Waste: ${e.payload.quantity} ${e.payload.unit} ${nameOf(e.payload.ingredientId)} (${(KIT_REASONS.find((r) => r[0] === e.payload.reason) || [, e.payload.reason])[1]})`;
+  $('view').innerHTML = `
+    ${S.note ? `<div class="note ${S.note.kind || ''}" role="status">${esc(S.note.text)}</div>` : ''}
+    <div class="card mt"><button class="btn block" id="k-prod">Stock journal: record production</button><button class="btn line block mt" id="k-drafts">Drafts and posted vouchers</button><button class="btn line block mt" id="k-waste">Record food waste</button>${S.snap.canReceive ? '<button class="btn line block mt" id="k-recv">Receive stock</button>' : ''}${S.snap.canReceive && (S.snap.stockPlaces || []).length > 1 ? '<button class="btn line block mt" id="k-move">Move stock</button>' : ''}${S.snap.canReceive ? '<button class="btn line block mt" id="k-fix">Correct stock</button>' : ''}
+      <p class="mute center">Works without a connection. It is sent when the phone is online.</p></div>
+    <h2 class="mt">Recent</h2>
+    ${evs.length ? evs.map((e) => `<div class="card mt" data-ev="${esc(e.id)}"><b>${esc(describe(e))}</b><div class="mute">${esc(new Date(e.createdAt).toLocaleString())} &middot; ${EV_LABEL[e.status]}</div>${e.status === 'failed' ? `<div class="note bad mt">${esc(e.error || 'Refused')}</div><div class="row mt"><button class="btn ghost" data-retry="${esc(e.id)}">Try again</button><button class="btn line" data-dismiss="${esc(e.id)}">Set aside</button></div>` : ''}</div>`).join('') : '<p class="mute center mt">Nothing recorded on this phone yet.</p>'}`;
+  $('k-prod').onclick = () => openStockJournal();
+  $('k-drafts').onclick = openSjList;
+  $('k-waste').onclick = openWaste;
+  if ($('k-recv')) $('k-recv').onclick = openReceive;
+  if ($('k-move')) $('k-move').onclick = openMove;
+  if ($('k-fix')) $('k-fix').onclick = openCorrect;
+  document.querySelectorAll('[data-retry]').forEach((b) => (b.onclick = async () => (await retryEvent(b.dataset.retry), gatedSync({ refreshMenu: false }), viewKitchen())));
+  document.querySelectorAll('[data-dismiss]').forEach((b) => (b.onclick = async () => { if (!confirm('Set this record aside? It stays on the phone for reference but will not be sent to the server.')) return; await dismissEvent(b.dataset.dismiss); await refreshPending(); viewKitchen(); }));
+}
+
+// ------------------------------------------------------------ stock journal ---
+// The production voucher on the phone. Same server routes, rules and permissions as the web voucher: the phone shows
+// what the account may do, checks that input is not empty or unreadable, and the server decides everything about stock
+// (lib/stockjournal.js). A new voucher is written on the phone before it is sent, so it is never lost and never posted
+// twice; drafts, recipes and new items need a connection because the server is where they live.
+const SJ_UNITS = ['KG', 'G', 'L', 'ML', 'PIECE', 'DOZEN', 'PACK', 'BOX'];
+const SJ_SHIFTS = ['Morning', 'Afternoon', 'Evening', 'Night'];
+let sjTimer = null;
+const sjBranch = () => (S.snap && S.snap.branch && S.snap.branch.id) || '';
+async function sjSend(method, path, body) {
+  if (!SJ) return { status: 0, data: null };
+  try {
+    if (!SJ.base) SJ.base = await pickServer(await kv.get('serverBase'));
+    if (!SJ.base) return { status: 0, data: null };
+    return await request(SJ.base, method, path, body);
+  } catch {
+    SJ.base = null;
+    return { status: 0, data: null };
+  }
+}
+// What was typed is kept on the phone as it is typed, so a closed sheet, a call, a dead battery or the app being
+// swiped away does not lose it. It is cleared when the voucher is saved or posted, or with "Clear".
+const sjPersist = () => {
+  clearTimeout(sjTimer);
+  sjTimer = setTimeout(() => SJ && !SJ.F.draftId && kv.set('sjForm', SJ.F).catch(() => {}), 250);
+};
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && SJ && !SJ.F.draftId) kv.set('sjForm', SJ.F).catch(() => {});
+});
+const sjNum = (v) => (v === undefined || v === null || v === '' ? '' : String(Number(v)));
+const sjItemLabel = (i) => `${esc(i.name)}${i.currentStock !== undefined ? ` — ${sjNum(i.currentStock)} ${esc(i.unit)}` : ''}`;
+const sjErr = (text) => {
+  const b = $('sj-err');
+  if (!b) return;
+  b.textContent = text || '';
+  b.hidden = !text;
+  if (text) b.scrollIntoView({ block: 'nearest' });
+};
+const sjBusy = (on) => {
+  if (SJ) SJ.busy = on;
+  document.querySelectorAll('#sj-foot button, #sj-body [data-act]').forEach((b) => (b.disabled = on || b.dataset.off === '1'));
+};
+
+function sjKeepVisible(el) {
+  const box = $('sj-body');
+  if (!el.isConnected || !box) return;
+  const a = el.getBoundingClientRect();
+  const b = box.getBoundingClientRect();
+  if (a.top < b.top || a.bottom > b.bottom) el.scrollIntoView({ block: 'center' });
+}
+
+function openStockJournal(draftForm) {
+  const caps = capsFrom(S.snap);
+  if (!caps.record) return;
+  SJ = { F: draftForm || null, items: S.snap.stockItems.map((i) => ({ ...i })), recipes: { state: 'choose-product', recipes: [] }, sub: null, busy: false, base: null, restored: false, activeRow: 0, rtok: 0, caps, review: null, cats: null, costing: false };
+  openSheet(
+    `<header><h2 id="sj-title">Stock journal</h2><button class="btn line" data-close aria-label="Close" style="min-height:44px;width:44px;padding:0">×</button></header>
+     <div class="body" id="sj-body"></div><footer class="sjfoot" id="sj-foot"></footer>`,
+    async () => {
+      if (!SJ.F) {
+        const saved = await kv.get('sjForm').catch(() => null);
+        SJ.F = saved && Array.isArray(saved.rows) ? { ...emptyForm(), ...saved } : emptyForm();
+        SJ.restored = !!(saved && (saved.productId || saved.rows.some((r) => r.ingredientId)));
+      }
+      sjRender();
+      // Is costed production on? Asked when online, remembered for when the phone is not.
+      kv.get('sjCosting').then((c) => { if (SJ && c !== undefined) SJ.costing = !!c; });
+      loadCosting(sjSend, sjBranch()).then((c) => { if (c !== null) { if (SJ) SJ.costing = c; kv.set('sjCosting', c).catch(() => {}); } });
+      loadStockItems(sjSend, sjBranch()).then((live) => {
+        if (live && SJ) {
+          SJ.items = live;
+          sjRender();
+        }
+      });
+      if (SJ.F.productId) sjLoadRecipes();
+    },
+  );
+  const body = $('sj-body');
+  body.addEventListener('input', sjOnInput);
+  body.addEventListener('change', sjOnChange);
+  body.addEventListener('click', sjOnClick);
+  $('sj-foot').addEventListener('click', sjOnClick);
+  body.addEventListener('focusin', (e) => {
+    const r = e.target.closest && e.target.closest('[data-row]');
+    if (r && SJ) SJ.activeRow = Number(r.dataset.row);
+    // Keep a field that is under the keyboard in view. Only when it really is hidden: moving the page under a finger
+    // that is about to tap something else would swallow that tap.
+    const f = e.target;
+    if (f.tagName === 'INPUT') setTimeout(() => sjKeepVisible(f), 350);
+  });
+}
+
+async function sjLoadRecipes() {
+  if (!SJ || !SJ.F.productId) return;
+  const tok = ++SJ.rtok;
+  SJ.recipes = { state: 'loading', recipes: [] };
+  sjRender();
+  const r = await loadRecipes(sjSend, sjBranch(), SJ.F.productId);
+  if (!SJ || tok !== SJ.rtok) return; // a newer product was chosen meanwhile
+  SJ.recipes = r;
+  sjRender();
+}
+
+function sjRender() {
+  const body = $('sj-body');
+  const foot = $('sj-foot');
+  if (!body || !SJ) return;
+  if (SJ.sub) return sjRenderSub(body, foot);
+  const { F, items, caps, recipes } = SJ;
+  const by = new Map(items.map((i) => [i.id, i]));
+  const made = items.filter((i) => i.kind === 'PREPARED');
+  const raw = items.filter((i) => i.kind === 'PURCHASED');
+  const opts = (list, sel) => `<option value="">Choose…</option>${list.map((i) => `<option value="${esc(i.id)}" ${i.id === sel ? 'selected' : ''}>${sjItemLabel(i)}</option>`).join('')}`;
+  const prod = by.get(F.productId);
+  $('sj-title').textContent = F.draftNo ? `Draft ${F.draftNo}` : 'Stock journal';
+  const rs = recipes.state;
+  const recipeHtml =
+    rs === 'choose-product' ? '<p class="mute">Choose the product first; its saved recipes will appear here.</p>'
+    : rs === 'loading' ? '<p class="mute" role="status">Loading recipes…</p>'
+    : rs === 'error' ? `<div class="note bad" role="alert">Could not load recipes for this product. ${esc(recipes.error || '')}<button class="btn ghost" data-act="retry-recipes">Try again</button></div>`
+    : rs === 'offline' ? '<p class="mute" role="status">Recipes need a connection. You can still type the ingredients.</p>'
+    : rs === 'empty' ? `<p role="status"><b>${esc(NO_RECIPES_FOR_PRODUCT)}</b></p>`
+    : `<label for="sj-recipe">Recipe</label><select id="sj-recipe" data-f="recipeKey"><option value="">No recipe (type it by hand)</option>${recipes.recipes.map((r) => `<option value="${esc(r.kind)}:${esc(r.id)}" ${F.recipeKey === `${r.kind}:${r.id}` ? 'selected' : ''}>${esc(r.name)} · base ${esc(sjNum(r.baseOutputQty))} ${esc(String(r.outputUnit).toLowerCase())}</option>`).join('')}</select>
+       <button class="btn ghost block" data-act="fill" ${F.recipeKey ? '' : 'disabled data-off="1"'}>Fill from recipe</button>`;
+  const rowsHtml = F.rows.map((r, i) => {
+    const it = by.get(r.ingredientId);
+    return `<div class="sjrow" data-row="${i}">
+      <select data-r="${i}" data-k="ingredientId" aria-label="Ingredient used, row ${i + 1}">${opts(raw, r.ingredientId)}</select>
+      <div class="sjq"><input data-r="${i}" data-k="quantity" inputmode="decimal" placeholder="Quantity" aria-label="Quantity used, row ${i + 1}" value="${esc(r.quantity)}">
+        <select data-r="${i}" data-k="unit" aria-label="Unit, row ${i + 1}" ${it ? '' : 'disabled'}>${it ? unitOpts(it, r.unit || it.unit) : '<option>Unit</option>'}</select>
+        <button class="btn line sjx" data-act="rm" data-i="${i}" aria-label="Remove ingredient row ${i + 1}" ${F.rows.length === 1 ? 'disabled data-off="1"' : ''}>×</button></div>
+      <small class="mute" data-hint="${i}">${sjHint(r, it)}</small></div>`;
+  }).join('');
+  body.innerHTML = `
+    <div id="sj-err" class="note bad" role="alert" hidden></div>
+    ${SJ.restored ? '<div class="note warn" role="status">Your unsaved entries were restored. <button class="btn ghost" data-act="clear">Clear</button></div>' : ''}
+    <p class="mute">Nothing changes in stock until you post. Saving a draft or a recipe never moves stock.</p>
+    <label for="sj-prod">Product made</label>
+    <select id="sj-prod" data-f="productId">${opts(made, F.productId)}</select>
+    ${caps.menuItems ? '<button class="btn line block" data-act="add-menu">+ Add menu item</button>' : ''}
+    <div class="sjrecipe">${recipeHtml}</div>
+    <p class="mute sjexplain">A recipe is a reusable list of ingredients and quantities for making one product.</p>
+    <label for="sj-mq">Good quantity made</label>
+    <div class="sjq2"><input id="sj-mq" data-f="madeQty" inputmode="decimal" placeholder="Quantity" value="${esc(F.madeQty)}"><select data-f="madeUnit" aria-label="Unit made" ${prod ? '' : 'disabled'}>${prod ? unitOpts(prod, F.madeUnit || prod.unit) : '<option>Unit</option>'}</select></div>
+    <label for="sj-rej">Rejected (optional, not stocked)</label>
+    <input id="sj-rej" data-f="rejected" inputmode="decimal" placeholder="0" value="${esc(F.rejected)}">
+    <h3 class="sec">Source / Consumption</h3>
+    ${rowsHtml}
+    <button class="btn ghost block" data-act="add-row">+ Add ingredient row</button>
+    ${caps.inventoryItems ? '<button class="btn line block" data-act="add-inv">+ Add inventory item</button>' : ''}
+    <label for="sj-shift">Shift</label>
+    <select id="sj-shift" data-f="shift"><option value="">None</option>${SJ_SHIFTS.map((s) => `<option ${F.shift === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+    <label for="sj-batch">Batch / reference no. (optional)</label>
+    <input id="sj-batch" data-f="batchRef" maxlength="80" value="${esc(F.batchRef)}">
+    <label for="sj-notes">Narration (optional)</label>
+    <input id="sj-notes" data-f="notes" maxlength="1000" value="${esc(F.notes)}">`;
+  foot.innerHTML = `
+    ${caps.post ? `<button class="btn block" data-act="review">${F.draftId ? 'Review and post draft' : 'Review and post'}</button>` : '<p class="mute center">Your account can save drafts. Someone with permission to post must post them.</p>'}
+    <div class="sjfoot2"><button class="btn line" data-act="draft" title="Saves the voucher on the server. Stock does not change.">Save draft</button>${caps.recipes ? '<button class="btn line" data-act="recipe">Save as recipe</button>' : ''}</div>`;
+}
+
+function sjHint(r, it) {
+  if (!it) return '';
+  const bits = [];
+  if (it.currentStock !== undefined) bits.push(`Available: ${sjNum(it.currentStock)} ${esc(it.unit)}`);
+  else bits.push('Stock shown when online');
+  if (r.expected) bits.push(`Recipe expects ${esc(sjNum(r.expected))} ${esc(r.unit || it.unit)}`);
+  const short = shortRows({ rows: [r] }, [it]).length;
+  return `${bits.join(' · ')}${short ? ' · <b class="bad">more than is in stock</b>' : ''}`;
+}
+
+function sjOnInput(e) {
+  const t = e.target;
+  if (!SJ) return;
+  if (t.dataset.r !== undefined && t.dataset.k === 'quantity') {
+    const i = Number(t.dataset.r);
+    SJ.F.rows[i].quantity = t.value;
+    const h = document.querySelector(`[data-hint="${i}"]`);
+    if (h) h.innerHTML = sjHint(SJ.F.rows[i], SJ.items.find((x) => x.id === SJ.F.rows[i].ingredientId));
+  } else if (t.dataset.f && t.tagName === 'INPUT') SJ.F[t.dataset.f] = t.value;
+  sjPersist();
+}
+function sjOnChange(e) {
+  const t = e.target;
+  // Typed fields are kept by sjOnInput. Re-drawing on their blur would replace the button the person is tapping
+  // and lose that tap, so only dropdowns come through here.
+  if (!SJ || t.tagName !== 'SELECT') return;
+  const it = (id) => SJ.items.find((x) => x.id === id);
+  if (t.dataset.r !== undefined) {
+    const row = SJ.F.rows[Number(t.dataset.r)];
+    row[t.dataset.k] = t.value;
+    if (t.dataset.k === 'ingredientId') {
+      row.unit = (it(t.value) || {}).unit || '';
+      row.expected = '';
+    }
+    sjRender();
+  } else if (t.dataset.f === 'productId') {
+    SJ.F.productId = t.value;
+    SJ.F.madeUnit = (it(t.value) || {}).unit || '';
+    SJ.F.recipeKey = '';
+    SJ.recipes = { state: t.value ? 'loading' : 'choose-product', recipes: [] };
+    if (t.value) sjLoadRecipes();
+    else sjRender();
+  } else if (t.dataset.f) {
+    SJ.F[t.dataset.f] = t.value;
+    if (t.dataset.f === 'recipeKey') sjRender();
+  }
+  sjPersist();
+}
+
+async function sjOnClick(e) {
+  const b = e.target.closest && e.target.closest('[data-act]');
+  if (!b || !SJ || SJ.busy || b.disabled) return;
+  const act = b.dataset.act;
+  const { F } = SJ;
+  const branch = sjBranch();
+  if (act === 'add-row') { F.rows.push({ ingredientId: '', quantity: '', unit: '', expected: '' }); SJ.activeRow = F.rows.length - 1; sjRender(); sjPersist(); }
+  else if (act === 'rm') { F.rows.splice(Number(b.dataset.i), 1); sjRender(); sjPersist(); }
+  else if (act === 'clear') { SJ.F = emptyForm(); SJ.restored = false; SJ.recipes = { state: 'choose-product', recipes: [] }; await kv.del('sjForm').catch(() => {}); sjRender(); }
+  else if (act === 'retry-recipes') sjLoadRecipes();
+  else if (act === 'fill') {
+    sjBusy(true);
+    const r = await fillFromRecipe(sjSend, branch, F);
+    sjBusy(false);
+    if (!r.ok) return sjErr(r.error);
+    F.rows = r.rows.length ? r.rows : F.rows;
+    sjErr('');
+    sjRender();
+    sjPersist();
+    const n = $('sj-err');
+    if (n) { n.className = 'note'; n.textContent = `Filled from ${r.name} v${r.version}. Type what was really used; you can change every quantity.`; n.hidden = false; }
+  }
+  else if (act === 'add-inv') { SJ.sub = { kind: 'inv', error: null }; sjRender(); }
+  else if (act === 'add-menu') { SJ.sub = { kind: 'menu', error: null }; sjRender(); if (!SJ.cats) sjLoadCats(); }
+  else if (act === 'recipe') {
+    const p = recipeProblem(F, SJ.items, 'x');
+    if (p) return sjErr(p);
+    SJ.sub = { kind: 'recipe', error: null };
+    sjRender();
+  }
+  else if (act === 'draft') {
+    const p = formProblem(F, SJ.items);
+    if (p) return sjErr(p);
+    sjBusy(true);
+    const r = await saveDraft(sjSend, branch, F, SJ.items, { costing: SJ.costing });
+    sjBusy(false);
+    if (!r.ok) return sjErr(r.error);
+    await kv.del('sjForm').catch(() => {});
+    closeSheet();
+    S.note = { text: `Draft ${r.entryNo} saved. Stock has not changed; post it from Drafts and posted.` };
+    viewKitchen();
+  }
+  else if (act === 'review') sjReview();
+  else if (act === 'post') sjPost();
+  else if (act === 'back') { SJ.sub = null; SJ.review = null; sjRender(); }
+}
+
+async function sjLoadCats() {
+  const r = await sjSend('GET', `/api/v1/menu/categories?branchId=${encodeURIComponent(sjBranch())}`);
+  if (SJ && r.status === 200 && Array.isArray(r.data)) {
+    SJ.cats = r.data;
+    if (SJ.sub && SJ.sub.kind === 'menu') sjRender();
+  } else if (SJ && SJ.sub) {
+    SJ.sub.error = friendlyError(r);
+    sjRender();
+  }
+}
+
+function sjRenderSub(body, foot) {
+  const sub = SJ.sub;
+  const err = `<div id="sj-err" class="note bad" role="alert" ${sub.error ? '' : 'hidden'}>${esc(sub.error || '')}</div>`;
+  const unitSel = (id, def) => `<select id="${id}">${SJ_UNITS.map((u) => `<option ${u === def ? 'selected' : ''}>${u}</option>`).join('')}</select>`;
+  if (sub.kind === 'inv') {
+    body.innerHTML = `${err}<h3 class="sec">Add inventory item</h3><p class="mute">Creates a raw material for this voucher. It is not added to the menu. Stock starts at zero.</p>
+      <label for="sx-name">Name</label><input id="sx-name" autocomplete="off" value="${esc(sub.name || '')}"><label for="sx-unit">Stock unit</label>${unitSel('sx-unit', sub.unit || 'KG')}`;
+    foot.innerHTML = '<button class="btn block" id="sx-go">Add inventory item</button><button class="btn line block" data-act="back">Cancel</button>';
+    $('sx-go').onclick = () => sjCreate('inv');
+  } else if (sub.kind === 'menu') {
+    body.innerHTML = `${err}<h3 class="sec">Add menu item</h3><p class="mute">Creates a finished product and puts it on the POS menu. Stock starts at zero. Type the price and tax: nothing is filled in for you.</p>
+      <label for="sx-name">Name</label><input id="sx-name" autocomplete="off" value="${esc(sub.name || '')}"><label for="sx-unit">Stock unit</label>${unitSel('sx-unit', sub.unit || 'PIECE')}
+      <label for="sx-cat">Menu category</label><select id="sx-cat"><option value="">${SJ.cats ? 'Choose a category' : 'Loading…'}</option>${(SJ.cats || []).map((c) => `<option value="${esc(c.id)}" ${c.id === sub.categoryId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+      <label for="sx-price">Selling price (tax included)</label><input id="sx-price" inputmode="decimal" value="${esc(sub.price || '')}"><label for="sx-tax">Tax rate %</label><input id="sx-tax" inputmode="decimal" placeholder="e.g. 5" value="${esc(sub.tax || '')}">`;
+    foot.innerHTML = '<button class="btn block" id="sx-go">Add menu item</button><button class="btn line block" data-act="back">Cancel</button>';
+    $('sx-go').onclick = () => sjCreate('menu');
+  } else if (sub.kind === 'recipe') {
+    const prod = SJ.items.find((i) => i.id === SJ.F.productId);
+    body.innerHTML = `${err}<h3 class="sec">Save as recipe</h3><p class="mute">Saves these ingredients and quantities as a reusable recipe for ${esc(prod ? prod.name : 'this product')}, making ${esc(SJ.F.madeQty)} ${esc((SJ.F.madeUnit || '').toLowerCase())}. This does not change stock and does not save or post the voucher. Your entries stay here.</p>
+      <label for="sx-name">Recipe name</label><input id="sx-name" autocomplete="off" value="${esc(sub.name ?? (prod ? prod.name : ''))}">`;
+    foot.innerHTML = '<button class="btn block" id="sx-go">Save recipe</button><button class="btn line block" data-act="back">Cancel</button>';
+    $('sx-go').onclick = () => sjCreate('recipe');
+  } else if (sub.kind === 'review') {
+    const v = sub.preview;
+    const by = new Map(SJ.items.map((i) => [i.id, i]));
+    const usedHtml = (v ? v.inputs.map((l) => `<div class="row"><span class="grow">${esc(l.name)}</span><b class="bad">−${esc(sjNum(l.quantity))} ${esc(l.unit)}</b></div>`)
+      : SJ.F.rows.filter((r) => r.ingredientId).map((r) => `<div class="row"><span class="grow">${esc((by.get(r.ingredientId) || {}).name || '')}</span><b class="bad">−${esc(r.quantity)} ${esc(r.unit)}</b></div>`)).join('');
+    const madeHtml = (v ? v.outputs.map((o) => `<div class="row"><span class="grow">${esc(o.name)}</span><b class="ok">+${esc(sjNum(o.good))} ${esc(o.unit)}</b></div>`)
+      : [`<div class="row"><span class="grow">${esc((by.get(SJ.F.productId) || {}).name || '')}</span><b class="ok">+${esc(SJ.F.madeQty)} ${esc(SJ.F.madeUnit)}</b></div>`]).join('');
+    const short = v && v.shortages && v.shortages.length ? `<div class="note bad" role="alert">Not enough stock: ${esc(v.shortages.join('; '))}. Stock is never allowed to go below zero. Change the quantity or fix the count first.</div>` : '';
+    const cost = v && v.costError ? `<div class="note bad" role="alert">${esc(friendlyError({ status: 400, data: { message: v.costError } }))}</div>` : '';
+    body.innerHTML = `${err}<h3 class="sec">Check the voucher</h3>
+      <p class="mute">${sub.offline ? 'No connection, so this is shown as you entered it. The server checks it when it is sent.' : 'Stock changes only when you press Post.'}</p>
+      ${short}${cost}<h4>Used (out of stock)</h4>${usedHtml}<h4>Made (into stock)</h4>${madeHtml}
+      ${v && v.costed && v.totalCost ? `<div class="row"><span class="grow">Total batch cost</span><b>${esc(inr(v.totalCost))}</b></div>${v.outputs.length === 1 && v.outputs[0].unitCost ? `<div class="row"><span class="grow">Cost per good unit</span><b>${esc(inr(v.outputs[0].unitCost))}</b></div>` : ''}` : ''}`;
+    const blocked = v && (v.canPost === false || (v.shortages && v.shortages.length));
+    foot.innerHTML = `<button class="btn block" data-act="post" ${blocked ? 'disabled data-off="1"' : ''}>${SJ.F.draftId ? 'Post draft' : 'Post'}</button><button class="btn line block" data-act="back">Back to edit</button>`;
+  }
+}
+
+async function sjReview() {
+  const p = formProblem(SJ.F, SJ.items);
+  if (p) return sjErr(p);
+  sjErr('');
+  sjBusy(true);
+  const b = voucherBody(SJ.F, SJ.items, {});
+  const r = await sjSend('POST', `/api/v1/inventory/production/voucher-preview?branchId=${encodeURIComponent(sjBranch())}`, { inputs: b.inputs, outputs: b.outputs, ...(SJ.costing ? { costing: { enabled: true, costs: [] } } : {}) });
+  sjBusy(false);
+  if (r.status === 0) SJ.sub = { kind: 'review', preview: null, offline: true };
+  else if (r.status === 200 || r.status === 201) SJ.sub = { kind: 'review', preview: r.data };
+  else return sjErr(friendlyError(r));
+  sjRender();
+}
+
+async function sjPost() {
+  const { F } = SJ;
+  sjBusy(true);
+  let r;
+  if (F.draftId) r = await postDraft(sjSend, sjBranch(), F, SJ.items, { costing: SJ.costing });
+  else r = await postNew({ queueEvent, syncNow, getEvent: (id) => events.get(id), dismissEvent }, F, SJ.items, { userId: S.snap.user.id, deviceId: await kv.get('deviceId'), costing: SJ.costing });
+  sjBusy(false);
+  if (!r.ok) {
+    SJ.sub = null; // back to the form with everything still typed in, and the reason on top
+    sjRender();
+    return sjErr(r.error);
+  }
+  await kv.del('sjForm').catch(() => {});
+  closeSheet();
+  S.note = { text: r.posted === false ? 'Saved on this phone. It will be posted when there is a connection.' : `${F.draftNo || 'Voucher'} posted. Stock is updated.` };
+  if (r.waiting) syncNow({ refreshMenu: false }).then(afterSync);
+  await refreshPending();
+  viewKitchen();
+}
+
+async function sjCreate(kind) {
+  const val = (id) => ($(id) ? $(id).value : '');
+  const sub = SJ.sub;
+  const branch = sjBranch();
+  sjBusy(true);
+  let r;
+  if (kind === 'inv') r = await createInventoryItem(sjSend, branch, { name: val('sx-name'), unit: val('sx-unit') });
+  else if (kind === 'menu') r = await createMenuItem(sjSend, branch, { name: val('sx-name'), unit: val('sx-unit'), categoryId: val('sx-cat'), price: val('sx-price'), tax: val('sx-tax') });
+  else r = await saveRecipe(sjSend, branch, SJ.F, SJ.items, val('sx-name'));
+  sjBusy(false);
+  if (!r.ok) {
+    Object.assign(sub, { error: r.error, name: val('sx-name'), unit: val('sx-unit'), categoryId: val('sx-cat'), price: val('sx-price'), tax: val('sx-tax') });
+    return sjRender();
+  }
+  SJ.sub = null;
+  if (kind === 'recipe') {
+    SJ.F.recipeKey = `${r.recipe.kind || 'RECIPE'}:${r.recipe.id}`;
+    await sjLoadRecipes();
+    sjPersist();
+    const n = $('sj-err');
+    if (n) { n.className = 'note'; n.textContent = 'Recipe saved. Stock was not changed.'; n.hidden = false; }
+    return;
+  }
+  // The new item is picked in the row being worked on (menu items: in Product made); the rest of the form is untouched.
+  const live = await loadStockItems(sjSend, branch);
+  if (live) SJ.items = live;
+  else SJ.items.push({ id: r.id, name: val('sx-name') || '', unit: val('sx-unit'), kind: kind === 'inv' ? 'PURCHASED' : 'PREPARED', units: [val('sx-unit')] });
+  const item = SJ.items.find((i) => i.id === r.id);
+  if (kind === 'inv') {
+    const idx = SJ.F.rows[SJ.activeRow] && !SJ.F.rows[SJ.activeRow].ingredientId ? SJ.activeRow : SJ.F.rows.findIndex((x) => !x.ingredientId);
+    const row = { ingredientId: r.id, quantity: '', unit: item ? item.unit : '', expected: '' };
+    if (idx >= 0) Object.assign(SJ.F.rows[idx], row);
+    else SJ.F.rows.push(row);
+  } else {
+    SJ.F.productId = r.id;
+    SJ.F.madeUnit = item ? item.unit : '';
+    SJ.F.recipeKey = '';
+    SJ.recipes = { state: 'loading', recipes: [] };
+    syncNow().then(afterSync); // the new dish reaches this phone's POS menu
+  }
+  sjRender();
+  sjPersist();
+  if (kind === 'menu') sjLoadRecipes();
+  if (r.menuMissing) sjErr(`${val('sx-name')} was added to stock, but not to the menu: ${r.menuMissing} Add it under Menu.`);
+}
+
+// Drafts waiting on the server and vouchers already posted (read-only), for anyone who may record production.
+async function openSjList() {
+  SJ = { F: emptyForm(), items: S.snap.stockItems, base: null, sub: null, busy: false, caps: capsFrom(S.snap), recipes: { state: 'choose-product', recipes: [] }, rtok: 0 };
+  openSheet(`<header><h2>Drafts and posted</h2><button class="btn line" data-close aria-label="Close" style="min-height:44px;width:44px;padding:0">×</button></header><div class="body" id="sjl-body"><p class="mute">Loading…</p></div>`, async () => {
+    const q = (s) => sjSend('GET', `/api/v1/inventory/production?branchId=${encodeURIComponent(sjBranch())}&status=${s}`);
+    const [d, p] = await Promise.all([q('DRAFT'), q('POSTED')]);
+    const body = $('sjl-body');
+    if (!body) return;
+    if (d.status === 0 && p.status === 0) { body.innerHTML = '<div class="note warn" role="status">Drafts and posted vouchers live on the server and need a connection. Vouchers waiting to be sent are under Recent.</div>'; return; }
+    if (d.status !== 200 || p.status !== 200) { body.innerHTML = `<div class="note bad" role="alert">${esc(friendlyError(d.status !== 200 ? d : p))}</div>`; return; }
+    const nameOf = (e, role) => e.lines.filter((l) => l.role === role).map((l) => `${esc(sjNum(role === 'OUTPUT' ? l.quantity : l.enteredQuantity))} ${esc(role === 'OUTPUT' ? l.ingredient.unit : l.enteredUnit)} ${esc(l.ingredient.name)}`).join(', ');
+    const card = (e, draft) => `<div class="card mt"><b>${esc(e.entryNo)}</b> <span class="status ${draft ? 'PREPARING' : 'READY'}">${draft ? 'Draft: stock not changed' : 'Posted'}</span>
+      <div class="mute">${esc(new Date(e.producedAt).toLocaleString())}${e.batchRef ? ` · ${esc(e.batchRef)}` : ''}</div>
+      <div>Made ${nameOf(e, 'OUTPUT') || '–'}</div><div class="mute">Used ${nameOf(e, 'INPUT') || '–'}</div>
+      ${draft ? `<div class="row"><button class="btn ghost" data-open="${esc(e.id)}">Open</button>${capsFrom(S.snap).record ? `<button class="btn line" data-del="${esc(e.id)}">Delete</button>` : ''}</div>` : ''}</div>`;
+    body.innerHTML = `<h3 class="sec">Drafts (${d.data.length})</h3>${d.data.map((e) => card(e, true)).join('') || '<p class="mute">No drafts.</p>'}
+      <h3 class="sec">Posted (latest ${p.data.length})</h3>${p.data.map((e) => card(e, false)).join('') || '<p class="mute">Nothing posted yet.</p>'}`;
+    body.onclick = async (ev) => {
+      const o = ev.target.closest('[data-open]');
+      const x = ev.target.closest('[data-del]');
+      if (o) {
+        o.disabled = true;
+        const r = await sjSend('GET', `/api/v1/inventory/production/${encodeURIComponent(o.dataset.open)}?branchId=${encodeURIComponent(sjBranch())}`);
+        if (r.status !== 200) { o.disabled = false; return void (body.insertAdjacentHTML('afterbegin', `<div class="note bad" role="alert">${esc(friendlyError(r))}</div>`)); }
+        closeSheet();
+        openStockJournal(formFromDraft(r.data));
+      } else if (x) {
+        if (!confirm('Delete this draft? It never changed stock.')) return;
+        x.disabled = true;
+        const r = await deleteDraft(sjSend, sjBranch(), x.dataset.del);
+        if (!r.ok) { x.disabled = false; return void (body.insertAdjacentHTML('afterbegin', `<div class="note bad" role="alert">${esc(r.error)}</div>`)); }
+        x.closest('.card').remove();
+      }
+    };
+  });
+}
+
+function openWaste() {
+  const list = S.snap.stockItems;
+  openSheet(
+    `<h2>Record food waste</h2>
+     <label>Item<select id="w-i">${itemOpts(list)}</select></label>
+     <div class="row"><input id="w-q" inputmode="decimal" placeholder="Quantity" aria-label="Quantity"><select id="w-u" aria-label="Unit"></select></div>
+     <label>Reason<select id="w-r">${KIT_REASONS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select></label>
+     <input id="w-n" placeholder="Note (required for Other)" aria-label="Note">
+     <div id="w-err" class="note bad" hidden></div>
+     <button class="btn block mt" id="w-save">Save</button><button class="btn line block mt" data-close>Cancel</button>`,
+    (p) => {
+      const it = p.querySelector('#w-i');
+      it.onchange = () => { const x = list.find((i) => i.id === it.value); p.querySelector('#w-u').innerHTML = unitOpts(x, x && x.unit); };
+      p.querySelector('#w-save').onclick = async () => {
+        const err = p.querySelector('#w-err');
+        const reason = p.querySelector('#w-r').value;
+        const note = p.querySelector('#w-n').value.trim();
+        const qty = p.querySelector('#w-q').value.trim();
+        if (!it.value || !(Number(qty) > 0)) { err.textContent = 'Choose the item and type a quantity.'; err.hidden = false; return; }
+        if (reason === 'OTHER' && note.length < 3) { err.textContent = 'Say what happened.'; err.hidden = false; return; }
+        if (!(await saveKitchenEvent(p.querySelector('#w-save'), p.querySelector('#w-err'), 'waste', { ingredientId: it.value, quantity: qty, unit: p.querySelector('#w-u').value, reason, note: note || undefined, occurredAt: new Date().toISOString() }))) return;
+        closeSheet();
+        S.note = { text: 'Saved on this phone. It will be sent when there is a connection.' };
+        gatedSync({ refreshMenu: false });
+        viewKitchen();
+      };
+    },
+  );
+}
+
+function openReceive() {
+  const list = S.snap.stockItems.filter((i) => i.kind !== 'PREPARED');
+  openSheet(
+    `<h2>Receive stock</h2>
+     <label>Item<select id="rc-i">${itemOpts(list)}</select></label>
+     <div class="row"><input id="rc-q" inputmode="decimal" placeholder="Quantity" aria-label="Quantity"><select id="rc-u" aria-label="Unit"></select></div>
+     <input id="rc-r" placeholder="Supplier / invoice (optional)" aria-label="Reference">
+     <label>Use by (optional)<input id="rc-x" type="date"></label>
+     <div id="rc-err" class="note bad" hidden></div>
+     <button class="btn block mt" id="rc-save">Save</button><button class="btn line block mt" data-close>Cancel</button>`,
+    (p) => {
+      const it = p.querySelector('#rc-i');
+      it.onchange = () => { const x = list.find((i) => i.id === it.value); p.querySelector('#rc-u').innerHTML = unitOpts(x, x && x.unit); };
+      p.querySelector('#rc-save').onclick = async () => {
+        const err = p.querySelector('#rc-err');
+        const qty = p.querySelector('#rc-q').value.trim();
+        if (!it.value || !(Number(qty) > 0)) { err.textContent = 'Choose the item and type a quantity.'; err.hidden = false; return; }
+        const x = p.querySelector('#rc-x').value;
+        if (!(await saveKitchenEvent(p.querySelector('#rc-save'), p.querySelector('#rc-err'), 'receipt', { ingredientId: it.value, quantity: qty, unit: p.querySelector('#rc-u').value, reference: p.querySelector('#rc-r').value.trim() || undefined, expiryDate: x ? new Date(`${x}T00:00:00`).toISOString() : undefined, receivedAt: new Date().toISOString() }))) return;
+        closeSheet();
+        S.note = { text: 'Saved on this phone. It will be sent when there is a connection.' };
+        gatedSync({ refreshMenu: false });
+        viewKitchen();
+      };
+    },
+  );
+}
+
+
+/**
+ * Save one kitchen record on the phone. The button is locked while it saves so a double tap cannot queue the
+ * same stock movement twice, and a full or blocked phone store shows a message instead of failing silently.
+ */
+async function saveKitchenEvent(btn, errBox, kind, payload) {
+  if (btn.disabled) return false;
+  btn.disabled = true;
+  try {
+    await queueEvent(kind, payload, { userId: S.snap.user.id, deviceId: await kv.get('deviceId') });
+    return true;
+  } catch {
+    btn.disabled = false;
+    errBox.textContent = 'This phone could not save it (its storage may be full). Nothing was recorded. Free some space and try again.';
+    errBox.hidden = false;
+    return false;
+  }
+}
+const placeOpts = (sel, empty) => `<option value="">${empty}</option>${(S.snap.stockPlaces || []).map((p) => `<option value="${esc(p.id)}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}`;
+const savedNote = () => { S.note = { text: 'Saved on this phone. It will be sent when there is a connection.' }; };
+
+// Moving stock between places. The server checks the quantity against what the place holds when it receives
+// the entry; a refusal comes back as a card with the reason and a Try again button.
+function openMove() {
+  const list = S.snap.stockItems;
+  openSheet(
+    `<h2>Move stock</h2><p class="mute">The total does not change; only where it is kept.</p>
+     <label>Item<select id="mv-i">${itemOpts(list)}</select></label>
+     <div class="row"><input id="mv-q" inputmode="decimal" placeholder="Quantity" aria-label="Quantity"><select id="mv-u" aria-label="Unit"></select></div>
+     <label>From<select id="mv-f">${placeOpts('', 'Not yet placed anywhere')}</select></label>
+     <label>To<select id="mv-t">${placeOpts('', 'Choose a place…')}</select></label>
+     <div id="mv-err" class="note bad" hidden></div>
+     <button class="btn block mt" id="mv-save">Save</button><button class="btn line block mt" data-close>Cancel</button>`,
+    (p) => {
+      const it = p.querySelector('#mv-i');
+      it.onchange = () => { const x = list.find((i) => i.id === it.value); p.querySelector('#mv-u').innerHTML = unitOpts(x, x && x.unit); };
+      p.querySelector('#mv-save').onclick = async () => {
+        const err = p.querySelector('#mv-err');
+        const qty = p.querySelector('#mv-q').value.trim().replace(',', '.');
+        const from = p.querySelector('#mv-f').value;
+        const to = p.querySelector('#mv-t').value;
+        if (!it.value || !(Number(qty) > 0)) { err.textContent = 'Choose the item and type a quantity.'; err.hidden = false; return; }
+        if (!to) { err.textContent = 'Choose where the stock goes.'; err.hidden = false; return; }
+        if (from === to) { err.textContent = 'From and To must be different places.'; err.hidden = false; return; }
+        if (!(await saveKitchenEvent(p.querySelector('#mv-save'), p.querySelector('#mv-err'), 'transfer', { occurredAt: new Date().toISOString(), lines: [{ ingredientId: it.value, quantity: qty, unit: p.querySelector('#mv-u').value, direction: 'OUT', ...(from ? { fromLocationId: from } : {}), toLocationId: to }] }))) return;
+        closeSheet();
+        savedNote();
+        gatedSync({ refreshMenu: false });
+        viewKitchen();
+      };
+    },
+  );
+}
+
+// Correcting a count: remove or add the difference, with a reason.
+function openCorrect() {
+  const list = S.snap.stockItems;
+  openSheet(
+    `<h2>Correct stock</h2><p class="mute">Use when the shelf and the system disagree.</p>
+     <label>Item<select id="cr-i">${itemOpts(list)}</select></label>
+     <label>What is wrong<select id="cr-d"><option value="OUT">There is less than the system says (remove)</option><option value="IN">There is more than the system says (add)</option></select></label>
+     <div class="row"><input id="cr-q" inputmode="decimal" placeholder="Difference" aria-label="Difference"><select id="cr-u" aria-label="Unit"></select></div>
+     <input id="cr-r" placeholder="Why (required)" aria-label="Reason">
+     <div id="cr-err" class="note bad" hidden></div>
+     <button class="btn block mt" id="cr-save">Save</button><button class="btn line block mt" data-close>Cancel</button>`,
+    (p) => {
+      const it = p.querySelector('#cr-i');
+      it.onchange = () => { const x = list.find((i) => i.id === it.value); p.querySelector('#cr-u').innerHTML = unitOpts(x, x && x.unit); };
+      p.querySelector('#cr-save').onclick = async () => {
+        const err = p.querySelector('#cr-err');
+        const qty = p.querySelector('#cr-q').value.trim().replace(',', '.');
+        const why = p.querySelector('#cr-r').value.trim();
+        if (!it.value || !(Number(qty) > 0)) { err.textContent = 'Choose the item and type the difference.'; err.hidden = false; return; }
+        if (why.length < 3) { err.textContent = 'Say why the stock was wrong.'; err.hidden = false; return; }
+        if (!(await saveKitchenEvent(p.querySelector('#cr-save'), p.querySelector('#cr-err'), 'correction', { occurredAt: new Date().toISOString(), reason: why, lines: [{ ingredientId: it.value, quantity: qty, unit: p.querySelector('#cr-u').value, direction: p.querySelector('#cr-d').value }] }))) return;
+        closeSheet();
+        savedNote();
+        gatedSync({ refreshMenu: false });
+        viewKitchen();
+      };
+    },
+  );
+}
+
+// ------------------------------------------------------------------ shift ---
+// Clock in and out work with no connection: the phone records the real time and sends it later. If the
+// server disagrees (already clocked in somewhere else, a payroll already approved) the record stays here
+// with the server's reason so the person, or a manager, can sort it out.
+async function viewShift() {
+  const all = (await events.all()).filter((e) => e.kind === 'attendance');
+  const st = shiftState(all);
+  const fmt = (iso) => new Date(iso).toLocaleString();
+  $('view').innerHTML = `
+    ${S.note ? `<div class="note ${S.note.kind || ''}" role="status">${esc(S.note.text)}</div>` : ''}
+    <div class="card mt center">
+      <h2>${st.on ? 'On shift' : 'Off shift'}</h2>
+      <p class="mute">${st.on ? `Since ${esc(fmt(st.since))}` : 'Tap when you start work.'}</p>
+      <button class="btn block mt" id="sh-btn">${st.on ? 'Clock out' : 'Clock in'}</button>
+      <p class="mute">Works without a connection. The time is the time you tapped.</p>
+    </div>
+    <h2 class="mt">Recent</h2>
+    ${all.length ? all.slice(0, 20).map((e) => `<div class="card mt"><b>${e.payload.type === 'IN' ? 'Clocked in' : 'Clocked out'}</b> ${esc(fmt(e.payload.at || e.createdAt))}<div class="mute">${EV_LABEL[e.status]}${e.payload.breakMinutes ? ` &middot; ${e.payload.breakMinutes} min break` : ''}</div>${e.status === 'failed' ? `<div class="note bad mt">${esc(e.error || 'Refused')}</div><button class="btn ghost mt" data-retry="${esc(e.id)}">Try again</button>` : ''}</div>`).join('') : '<p class="mute center mt">Nothing recorded on this phone yet.</p>'}`;
+  document.querySelectorAll('[data-retry]').forEach((b) => (b.onclick = async () => (await retryEvent(b.dataset.retry), gatedSync({ refreshMenu: false }), viewShift())));
+  $('sh-btn').onclick = () => {
+    const record = async (extra = {}) => {
+      await queueEvent('attendance', { type: st.on ? 'OUT' : 'IN', at: new Date().toISOString(), ...extra }, { userId: S.snap.user.id, deviceId: await kv.get('deviceId') });
+      closeSheet();
+      gatedSync({ refreshMenu: false });
+      viewShift();
+    };
+    if (!st.on) return record();
+    openSheet(`<h2>Clock out</h2><label>Unpaid break taken (minutes)<input id="sh-br" inputmode="numeric" placeholder="0" value="0"></label><button class="btn block mt" id="sh-ok">Clock out now</button><button class="btn line block mt" data-close>Cancel</button>`, (pn) => {
+      pn.querySelector('#sh-ok').onclick = () => record({ breakMinutes: Math.max(0, Math.min(480, Number(pn.querySelector('#sh-br').value) || 0)) });
+    });
+  };
+}
+
 // ------------------------------------------------------------------- start ---
 async function start() {
+  let did = await kv.get('deviceId');
+  if (!did) { did = `phone-${newId()}`; await kv.set('deviceId', did); }
+  setDeviceId(did);
+  await loadStaff();
   S.snap = await kv.get('snapshot');
   S.setupDismissed = !!(await kv.get('setupDismissed'));
   if (!S.snap) return renderLogin();
-  if (S.snap.local) return render();
+  if (S.snap.local) {
+    setTimeout(() => autoBackup(), 5000);
+    return render();
+  }
   S.online = !!(await pickServer(await kv.get('serverBase')));
+  await syncStaffFromServer();
   render();
-  if (S.online) syncNow().then(afterSync);
+  if (S.online) gatedSync();
+  setTimeout(() => autoBackup(), 5000);
+}
+
+// Ask the phone not to clear this app's saved sales and records when it runs low on space. Unsent sales are real money;
+// without this, a browser-based phone may evict them. Harmless where it is already granted or unsupported.
+try {
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+} catch {
+  /* unsupported */
 }
 
 // Quietly try again when the phone is back online or the app is reopened.
-window.addEventListener('online', () => syncNow().then(afterSync));
-document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && S.snap && syncNow().then(afterSync));
-setInterval(() => S.snap && document.visibilityState === 'visible' && $('sheet').hidden && syncNow({ refreshMenu: false }).then(afterSync), 60000);
+window.addEventListener('online', () => gatedSync());
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && S.snap && gatedSync());
+setInterval(() => document.visibilityState === 'visible' && S.view === 'sell' && refreshLinkedPauses(), 15000);
+setInterval(() => S.snap && document.visibilityState === 'visible' && $('sheet').hidden && gatedSync({ refreshMenu: false }), 60000);
 
 
 start().catch((e) => {

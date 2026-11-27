@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { QRCodeSVG } from "qrcode.react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ export function TableQrDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useI18n();
   const rotate = useRotateQrToken(branchId);
 
   const orderUrl =
@@ -29,7 +31,7 @@ export function TableQrDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>{table.name ?? `Table ${table.number}`} — QR code</DialogTitle>
+          <DialogTitle>{table.name ?? t("Table {number}", { number: table.number })} {t("— QR code")}</DialogTitle>
         </DialogHeader>
 
         <div className="flex flex-col items-center gap-4 py-2">
@@ -44,14 +46,14 @@ export function TableQrDialog({
             </>
           ) : (
             <p className="py-8 text-sm text-muted-foreground">
-              No QR code yet — generate one below.
+              {t("No QR code yet — generate one below.")}
             </p>
           )}
 
           <div className="flex gap-2">
             {orderUrl && (
               <Button variant="outline" onClick={() => window.print()}>
-                Print
+                {t("Print")}
               </Button>
             )}
             <Button
@@ -60,16 +62,16 @@ export function TableQrDialog({
               onClick={() =>
                 rotate.mutate(table.id, {
                   onError: (err) =>
-                    toast.error(err instanceof ApiError ? err.message : "Could not generate QR code"),
+                    toast.error(err instanceof ApiError ? err.message : t("Could not generate QR code")),
                 })
               }
             >
-              {orderUrl ? "Generate new code" : "Generate QR code"}
+              {orderUrl ? t("Generate new code") : t("Generate QR code")}
             </Button>
           </div>
           {orderUrl && (
             <p className="text-center text-xs text-muted-foreground">
-              Generating a new code invalidates this one — reprint any table tents using it.
+              {t("Generating a new code invalidates this one — reprint any table tents using it.")}
             </p>
           )}
         </div>

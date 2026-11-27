@@ -23,6 +23,10 @@ import { AuditAction } from '../../audit/audit-action';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { BranchAccessService } from '../../common/services/branch-access.service';
+import {
+  BillShareService,
+  TRACK_TTL_SECONDS,
+} from '../bill-share/bill-share.service';
 import { DeliveryService } from './delivery.service';
 
 @ApiTags('delivery')
@@ -31,7 +35,25 @@ export class DeliveryController {
   constructor(
     private readonly delivery: DeliveryService,
     private readonly branchAccess: BranchAccessService,
+    private readonly links: BillShareService,
   ) {}
+
+  // A link the customer can open to watch this delivery. The token is signed and expires after 12 hours.
+  @Auth('delivery.manage')
+  @AuditAction('delivery.track_link', 'Order')
+  @Post('orders/:orderId/track-link')
+  async trackLink(
+    @CurrentUser() u: SessionUser,
+    @Query('branchId') branchId: string,
+    @Param('orderId') orderId: string,
+  ) {
+    await this.branchAccess.assertAccess(u.restaurantId, branchId);
+    await this.delivery.assertDeliveryOrder(branchId, orderId);
+    return {
+      token: this.links.issueTrackToken(orderId, branchId),
+      expiresInSeconds: TRACK_TTL_SECONDS,
+    };
+  }
 
   @Auth('delivery.manage')
   @Get('zones')
@@ -111,10 +133,27 @@ export class DeliveryController {
     @CurrentUser() u: SessionUser,
     @Query('branchId') branchId: string,
     @Param('orderId') orderId: string,
-    @Body() body: { driverId: string },
+    @Body() body: { driverId: string; reason?: string },
   ) {
     await this.branchAccess.assertAccess(u.restaurantId, branchId);
-    return this.delivery.assignDriver(branchId, orderId, body.driverId);
+    return this.delivery.assignDriver(
+      branchId,
+      orderId,
+      body.driverId,
+      u.id,
+      body.reason,
+    );
+  }
+
+  @Auth('delivery.manage')
+  @Get(':orderId/assignments')
+  async assignments(
+    @CurrentUser() u: SessionUser,
+    @Query('branchId') branchId: string,
+    @Param('orderId') orderId: string,
+  ) {
+    await this.branchAccess.assertAccess(u.restaurantId, branchId);
+    return this.delivery.assignmentHistory(branchId, orderId);
   }
 
   @Auth('delivery.manage')
@@ -127,6 +166,12 @@ export class DeliveryController {
     @Body() body: { status: DeliveryStatusDto },
   ) {
     await this.branchAccess.assertAccess(u.restaurantId, branchId);
-    return this.delivery.setStatus(branchId, orderId, body.status);
+    return this.delivery.setStatus(
+      branchId,
+      orderId,
+      body.status,
+      undefined,
+      u.id,
+    );
   }
 }

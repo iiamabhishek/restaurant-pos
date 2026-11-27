@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { Mail, Phone } from "lucide-react";
 import { useState } from "react";
 import { AddSupplierDialog } from "@/components/inventory/add-supplier-dialog";
@@ -11,6 +12,7 @@ import { useBranch } from "@/hooks/use-branch";
 import { useSuppliers } from "@/hooks/use-inventory";
 
 export default function SuppliersPage() {
+  const { t } = useI18n();
   const { branchId } = useBranch();
   const [search, setSearch] = useState("");
   const { data: suppliers, isLoading } = useSuppliers(branchId);
@@ -21,9 +23,9 @@ export default function SuppliersPage() {
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Inventory</h1>
+          <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("Inventory")}</h1>
           <p className="text-sm text-muted-foreground">
-            Ingredients, recipe costing, purchase orders, and waste
+            {t("Stock, daily production, purchasing, and food waste")}
           </p>
         </div>
         <AddSupplierDialog branchId={branchId} />
@@ -32,7 +34,7 @@ export default function SuppliersPage() {
       <InventoryTabs />
 
       <Input
-        placeholder="Search suppliers…"
+        placeholder={t("Search suppliers…")}
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         className="max-w-sm"
@@ -51,7 +53,7 @@ export default function SuppliersPage() {
               <div className="flex flex-col">
                 <span className="text-sm font-medium text-foreground">{s.name}</span>
                 <span className="text-xs text-muted-foreground">
-                  {s.contactName || "No contact person on file"}
+                  {s.contactName || t("No contact person on file")}
                 </span>
               </div>
               <div className="flex items-center gap-4 text-xs text-muted-foreground">
@@ -72,9 +74,9 @@ export default function SuppliersPage() {
           ))
         ) : (
           <div className="flex flex-col items-center gap-2 py-16 text-center">
-            <p className="text-sm font-medium text-foreground">No suppliers yet</p>
+            <p className="text-sm font-medium text-foreground">{t("No suppliers yet")}</p>
             <p className="text-sm text-muted-foreground">
-              Add a supplier before creating your first purchase order.
+              {t("Add a supplier before creating your first purchase order.")}
             </p>
           </div>
         )}

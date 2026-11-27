@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,7 @@ import type { RestaurantTable } from "@/hooks/use-tables";
 import { ApiError } from "@/lib/api";
 
 function AddWaitlistDialog({ branchId }: { branchId: string | null }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [customerName, setCustomerName] = useState("");
   const [phone, setPhone] = useState("");
@@ -48,28 +50,28 @@ function AddWaitlistDialog({ branchId }: { branchId: string | null }) {
       },
       {
         onSuccess: () => {
-          toast.success(`${customerName} added to waitlist`);
+          toast.success(t("{customerName} added to waitlist", { customerName }));
           setOpen(false);
           setCustomerName("");
           setPhone("");
           setPartySize("2");
           setQuotedWaitMinutes("15");
         },
-        onError: (err) => toast.error(err instanceof ApiError ? err.message : "Could not add"),
+        onError: (err) => toast.error(err instanceof ApiError ? err.message : t("Could not add")),
       },
     );
   };
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={<Button size="sm" variant="outline">Add to waitlist</Button>} />
+      <DialogTrigger render={<Button size="sm" variant="outline">{t("Add to waitlist")}</Button>} />
       <DialogContent className="sm:max-w-sm">
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>Add to waitlist</DialogTitle>
+            <DialogTitle>{t("Add to waitlist")}</DialogTitle>
           </DialogHeader>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="w-name">Name</Label>
+            <Label htmlFor="w-name">{t("Name")}</Label>
             <Input
               id="w-name"
               value={customerName}
@@ -80,7 +82,7 @@ function AddWaitlistDialog({ branchId }: { branchId: string | null }) {
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="w-party">Party size</Label>
+              <Label htmlFor="w-party">{t("Party size")}</Label>
               <Input
                 id="w-party"
                 type="number"
@@ -91,7 +93,7 @@ function AddWaitlistDialog({ branchId }: { branchId: string | null }) {
               />
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="w-wait">Quoted wait (min)</Label>
+              <Label htmlFor="w-wait">{t("Quoted wait (min)")}</Label>
               <Input
                 id="w-wait"
                 type="number"
@@ -102,12 +104,12 @@ function AddWaitlistDialog({ branchId }: { branchId: string | null }) {
             </div>
           </div>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="w-phone">Phone</Label>
+            <Label htmlFor="w-phone">{t("Phone")}</Label>
             <Input id="w-phone" value={phone} onChange={(e) => setPhone(e.target.value)} />
           </div>
           <DialogFooter>
             <Button type="submit" disabled={createEntry.isPending}>
-              {createEntry.isPending ? "Adding…" : "Add"}
+              {createEntry.isPending ? t("Adding…") : t("Add")}
             </Button>
           </DialogFooter>
         </form>
@@ -123,6 +125,7 @@ export function WaitlistPanel({
   branchId: string | null;
   availableTables: RestaurantTable[];
 }) {
+  const { t: translate } = useI18n();
   const { data: entries, isLoading } = useWaitlist(branchId);
   const seat = useSeatWaitlistEntry(branchId);
   const cancel = useCancelWaitlistEntry(branchId);
@@ -130,21 +133,19 @@ export function WaitlistPanel({
   return (
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-[18px] font-medium text-foreground">Waitlist</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{translate("Waitlist")}</h2>
         <AddWaitlistDialog branchId={branchId} />
       </div>
 
       {isLoading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <p className="text-sm text-muted-foreground">{translate("Loading…")}</p>
       ) : entries && entries.length > 0 ? (
         <div className="flex flex-col divide-y divide-border">
           {entries.map((entry) => (
             <div key={entry.id} className="flex items-center justify-between gap-3 py-2.5">
               <div className="flex flex-col">
                 <span className="text-sm font-medium text-foreground">{entry.customerName}</span>
-                <span className="text-xs text-muted-foreground">
-                  {entry.partySize} guests
-                  {entry.quotedWaitMinutes ? ` · ~${entry.quotedWaitMinutes} min` : ""}
+                <span className="text-xs text-muted-foreground">{translate("{partySize} guests", { partySize: entry.partySize })}{entry.quotedWaitMinutes ? translate(" · ~{quotedWaitMinutes} min", { quotedWaitMinutes: entry.quotedWaitMinutes }) : ""}
                 </span>
               </div>
               <div className="flex items-center gap-1">
@@ -153,7 +154,7 @@ export function WaitlistPanel({
                     className="rounded-lg px-2 py-1 text-xs font-medium text-primary hover:bg-accent"
                     disabled={availableTables.length === 0}
                   >
-                    Seat
+                    {translate("Seat")}
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     {availableTables.map((t) => (
@@ -161,7 +162,7 @@ export function WaitlistPanel({
                         key={t.id}
                         onClick={() => seat.mutate({ id: entry.id, tableId: t.id })}
                       >
-                        {t.name ?? `Table ${t.number}`}
+                        {t.name ?? translate("Table {number}", { number: t.number })}
                       </DropdownMenuItem>
                     ))}
                   </DropdownMenuContent>
@@ -172,14 +173,14 @@ export function WaitlistPanel({
                   className="text-muted-foreground hover:text-destructive"
                   onClick={() => cancel.mutate(entry.id)}
                 >
-                  Remove
+                  {translate("Remove")}
                 </Button>
               </div>
             </div>
           ))}
         </div>
       ) : (
-        <p className="py-4 text-sm text-muted-foreground">No one waiting.</p>
+        <p className="py-4 text-sm text-muted-foreground">{translate("No one waiting.")}</p>
       )}
     </Card>
   );

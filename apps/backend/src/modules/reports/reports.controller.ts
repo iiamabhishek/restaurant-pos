@@ -31,6 +31,19 @@ export class ReportsController {
     return this.reports.catalog(u.permissions);
   }
 
+  // Read-only view of one bill for report viewers. Declared before ':key' so "bills" is not read as a report key.
+  @Auth('reports.access')
+  @Get('bills/:orderId')
+  async bill(
+    @CurrentUser() u: SessionUser,
+    @Param('orderId') orderId: string,
+    @Query('branchId') branchId: string,
+  ) {
+    assertCanViewReport(u.permissions, 'invoices');
+    await this.branchAccess.assertAccess(u.restaurantId, branchId);
+    return this.reports.bill(branchId, orderId);
+  }
+
   @Auth('reports.access')
   @Get(':key')
   async run(
@@ -59,7 +72,7 @@ export class ReportsController {
     assertCanViewReport(u.permissions, key);
     await this.branchAccess.assertAccess(u.restaurantId, branchId);
     const r = await this.reports.run(key, branchId, from, to);
-    return toCsv(r.columns, r.rows);
+    return toCsv(r.columns, r.totals ? [...r.rows, r.totals] : r.rows);
   }
 
   // Excel / PDF / CSV through one endpoint. Same permissions as the CSV one.

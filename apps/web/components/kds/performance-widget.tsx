@@ -1,10 +1,12 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { Gauge } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { useKitchenPerformance } from "@/hooks/use-kds";
 
 export function PerformanceWidget({ branchId }: { branchId: string | null }) {
+  const { t } = useI18n();
   const { data } = useKitchenPerformance(branchId);
 
   if (!data || data.length === 0) return null;
@@ -13,7 +15,7 @@ export function PerformanceWidget({ branchId }: { branchId: string | null }) {
     <Card className="flex items-center gap-4 overflow-x-auto p-3">
       <div className="flex shrink-0 items-center gap-1.5 text-xs font-medium text-muted-foreground">
         <Gauge className="h-3.5 w-3.5" />
-        Avg. time to ready today
+        {t("Avg. time to ready today")}
       </div>
       {data.map((row) => (
         <div key={row.stationId} className="flex shrink-0 items-baseline gap-1.5 text-sm">

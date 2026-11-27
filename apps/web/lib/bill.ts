@@ -59,9 +59,9 @@ export function discountSummary(
   discountPercent: number,
   discountAmount: number,
   format: (n: number) => string,
+  formatPercent = (n: number) => `${n.toFixed(Number.isInteger(n) ? 0 : 2)}%`,
 ): string {
-  const pct = Number.isInteger(discountPercent) ? String(discountPercent) : discountPercent.toFixed(2);
-  return `${pct}% (${format(discountAmount)})`;
+  return `${formatPercent(discountPercent)} (${format(discountAmount)})`;
 }
 
 /** Parse a money input; blank means "not entered" (null), junk is NaN. */

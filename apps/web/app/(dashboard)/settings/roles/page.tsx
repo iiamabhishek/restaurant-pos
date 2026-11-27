@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
@@ -22,25 +24,27 @@ import { useDeleteRole, useRoles, type RoleWithPermissions } from "@/hooks/use-r
 import { ApiError } from "@/lib/api";
 
 export default function RolesPage() {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data: roles, isLoading } = useRoles();
   const deleteRole = useDeleteRole();
   const [createOpen, setCreateOpen] = useState(false);
   const [editingRole, setEditingRole] = useState<RoleWithPermissions | null>(null);
 
   const onDelete = (role: RoleWithPermissions) => {
-    if (!confirm(`Delete the "${role.label}" role? This cannot be undone.`)) return;
+    if (!confirm(t("Delete the \"{label}\" role? This cannot be undone.", { label: role.label }))) return;
     deleteRole.mutate(role.id, {
-      onSuccess: () => toast.success(`${role.label} deleted`),
+      onSuccess: () => toast.success(t("{label} deleted", { label: role.label })),
       onError: (err) =>
-        toast.error(err instanceof ApiError ? err.message : "Could not delete role"),
+        toast.error(err instanceof ApiError ? err.message : t("Could not delete role")),
     });
   };
 
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Settings</h1>
-        <p className="text-sm text-muted-foreground">Restaurant, branch, and staff configuration</p>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("Settings")}</h1>
+        <p className="text-sm text-muted-foreground">{t("Restaurant, branch, and staff configuration")}</p>
       </div>
 
       <SettingsTabs />
@@ -48,14 +52,13 @@ export default function RolesPage() {
       <Card className="flex flex-col gap-4 p-6">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-[18px] font-medium text-foreground">Roles &amp; permissions</h2>
+            <h2 className="text-[18px] font-medium text-foreground">{t("Roles & permissions")}</h2>
             <p className="text-sm text-muted-foreground">
-              Seeded roles cover the common staff types. Create a custom role — a display screen,
-              a valet, a host — with exactly the permissions it needs.
+              {t("Seeded roles cover the common staff types. Create a custom role — a display screen, a valet, a host — with exactly the permissions it needs.")}
             </p>
           </div>
           <Button size="sm" onClick={() => setCreateOpen(true)}>
-            Create role
+            {t("Create role")}
           </Button>
         </div>
 
@@ -69,34 +72,32 @@ export default function RolesPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Role</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Permissions</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead>{t("Role")}</TableHead>
+                <TableHead>{t("Type")}</TableHead>
+                <TableHead>{t("Permissions")}</TableHead>
+                <TableHead className="text-right">{t("Actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {roles.map((role) => (
                 <TableRow key={role.id}>
                   <TableCell className="font-medium text-foreground">
-                    {role.label}
-                    <div className="text-xs font-normal text-muted-foreground">{role.name}</div>
+                    {fmt.role(role.name, role.label)}
+                    {!role.isSystem && <div className="text-xs font-normal text-muted-foreground">{role.name}</div>}
                   </TableCell>
                   <TableCell>
                     <Badge variant={role.isSystem ? "secondary" : "outline"} className="font-normal">
-                      {role.isSystem ? "Seeded" : "Custom"}
+                      {role.isSystem ? t("Seeded") : t("Custom")}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-muted-foreground">
-                    {role.permissions.length} granted
-                  </TableCell>
+                  <TableCell className="text-muted-foreground">{t("{count} granted", { count: role.permissions.length })}</TableCell>
                   <TableCell className="text-right">
                     {role.isSystem ? (
                       <span className="text-xs text-muted-foreground">—</span>
                     ) : (
                       <div className="flex items-center justify-end gap-1">
                         <Button variant="ghost" size="sm" onClick={() => setEditingRole(role)}>
-                          Edit
+                          {t("Edit")}
                         </Button>
                         <Button
                           variant="ghost"
@@ -115,8 +116,8 @@ export default function RolesPage() {
           </Table>
         ) : (
           <div className="flex flex-col items-center gap-2 py-16 text-center">
-            <p className="text-sm font-medium text-foreground">No roles yet</p>
-            <p className="text-sm text-muted-foreground">Create your first custom role above.</p>
+            <p className="text-sm font-medium text-foreground">{t("No roles yet")}</p>
+            <p className="text-sm text-muted-foreground">{t("Create your first custom role above.")}</p>
           </div>
         )}
       </Card>

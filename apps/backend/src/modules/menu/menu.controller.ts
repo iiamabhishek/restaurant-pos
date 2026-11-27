@@ -18,6 +18,8 @@ import { persistUploadedImage } from '../../common/upload/object-storage';
 import {
   menuCategorySchema,
   menuItemSchema,
+  menuItemPauseSchema,
+  type MenuItemPauseDto,
   modifierGroupSchema,
   setComboComponentsSchema,
   type SessionUser,
@@ -167,7 +169,11 @@ export class MenuController {
     @Body() body: unknown,
   ) {
     await this.branchAccess.assertAccess(user.restaurantId, branchId);
-    return this.menuService.bulkPriceChange(branchId, user.id, body as z.infer<typeof bulkPriceSchema>);
+    return this.menuService.bulkPriceChange(
+      branchId,
+      user.id,
+      body as z.infer<typeof bulkPriceSchema>,
+    );
   }
 
   @Auth('menu.manage')
@@ -200,6 +206,21 @@ export class MenuController {
   ) {
     await this.branchAccess.assertAccess(user.restaurantId, branchId);
     return this.menuService.updateItem(branchId, id, user.id, body as never);
+  }
+
+  @Auth('menu.manage')
+  @Patch('items/:id/pause')
+  @UsePipes(new ZodValidationPipe(menuItemPauseSchema))
+  async setItemPause(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+    @Param('id') id: string,
+    @Body() body: MenuItemPauseDto,
+  ) {
+    if (typeof branchId !== 'string' || !branchId)
+      throw new BadRequestException('branchId is required');
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    return this.menuService.setItemPause(branchId, id, user.id, body);
   }
 
   @Auth('menu.manage')

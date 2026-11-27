@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,7 +27,7 @@ export function ReasonDialog({
   warning,
   reasons,
   confirmLabel,
-  keepLabel = "Keep it",
+  keepLabel: providedKeepLabel,
   onSubmit,
 }: {
   open: boolean;
@@ -40,6 +41,8 @@ export function ReasonDialog({
   keepLabel?: string;
   onSubmit: (reason: string) => Promise<unknown>;
 }) {
+  const { t } = useI18n();
+  const keepLabel = providedKeepLabel ?? t("Keep it");
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -63,7 +66,7 @@ export function ReasonDialog({
       setReason("");
       onOpenChange(false);
     } catch (err) {
-      setError(err instanceof ApiError || err instanceof Error ? err.message : "Something went wrong. Try again.");
+      setError(err instanceof ApiError || err instanceof Error ? err.message : t("Something went wrong. Try again."));
     } finally {
       setPending(false);
     }
@@ -83,7 +86,7 @@ export function ReasonDialog({
             </p>
           )}
           <div className="flex flex-col gap-2">
-            <Label htmlFor="reason-input">Reason</Label>
+            <Label htmlFor="reason-input">{t("Reason")}</Label>
             <Input
               id="reason-input"
               value={reason}
@@ -92,7 +95,7 @@ export function ReasonDialog({
               required
               autoFocus
               className="h-11"
-              placeholder="Why?"
+              placeholder={t("Why?")}
             />
             <div className="flex flex-wrap gap-2">
               {reasons.map((r) => (
@@ -112,7 +115,7 @@ export function ReasonDialog({
               {keepLabel}
             </Button>
             <Button type="submit" variant="destructive" className="h-11" disabled={pending || !reason.trim()}>
-              {pending ? "Working…" : confirmLabel}
+              {pending ? t("Working…") : confirmLabel}
             </Button>
           </DialogFooter>
         </form>

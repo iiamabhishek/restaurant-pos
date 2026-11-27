@@ -1,10 +1,13 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useMenuPauseLabels } from "@/hooks/use-menu-pauses";
 import { useI18n } from "@/lib/i18n/context";
+import { LOCALE_TAGS } from "@/lib/i18n/locales";
 import { formatCurrency } from "@/lib/format";
-import { KioskApiError, kioskApi } from "@/lib/kiosk-api";
+import { KioskApiError, kioskApi, type KioskMenu } from "@/lib/kiosk-api";
+import { withReportedMenuPauses } from "@/lib/menu-pauses";
 import { toOrderItems } from "@/lib/kiosk-basket";
 import { initialKioskState, isBasketLocked, kioskReducer } from "@/lib/kiosk-flow";
 import { uuid } from "@/lib/uuid";
@@ -24,6 +27,7 @@ const MENU_RETRY_MS = 10_000;
 export function KioskApp({ token }: { token: string }) {
   const { t, locale, setLocale } = useI18n();
   const [state, dispatch] = useReducer(kioskReducer, initialKioskState);
+  const queryClient = useQueryClient();
   const online = useOnline();
   const keepAwake = useScreenAwake();
   useKioskServiceWorker();
@@ -33,14 +37,19 @@ export function KioskApp({ token }: { token: string }) {
     queryFn: () => kioskApi.menu(token),
     retry: false,
     staleTime: 30_000,
-    // Polls only while the server can't be reached, and gently.
-    refetchInterval: (q) =>
-      q.state.status === "error" && (q.state.error as KioskApiError)?.kind !== "notFound"
-        ? MENU_RETRY_MS
-        : false,
+    refetchInterval: (q) => {
+      if (q.state.status === "error") {
+        return (q.state.error as KioskApiError)?.kind === "notFound" ? false : MENU_RETRY_MS;
+      }
+      return state.step === "menu" || state.step === "review" ? 15_000 : false;
+    },
   });
 
   const menu = menuQuery.data;
+  const menuItems = useMemo(() => menu?.categories.flatMap((category) => category.items), [menu]);
+  const pauseLabels = useMenuPauseLabels(menuItems, menu?.timezone);
+  // A lost response can belong to an already accepted order. Keep the exact retry available.
+  const blockedByPause = !isBasketLocked(state) && state.basket.some((line) => pauseLabels.has(line.menuItemId));
   const load: MenuLoad = menu
     ? menu.categories.length > 0
       ? { status: "ready", menu }
@@ -51,7 +60,7 @@ export function KioskApp({ token }: { token: string }) {
         : { status: "unreachable" }
       : { status: "loading" };
 
-  const localeTag = locale === "es" ? "es-ES" : "en-GB";
+  const localeTag = LOCALE_TAGS[locale];
   const fmt = useCallback(
     (n: number | string) => formatCurrency(n, menu?.currency ?? "EUR", localeTag),
     [menu?.currency, localeTag],
@@ -60,7 +69,7 @@ export function KioskApp({ token }: { token: string }) {
   // ---- submit ------------------------------------------------------------
   const inFlight = useRef(false);
   const submit = async () => {
-    if (!menu || !state.serviceType || inFlight.current || state.submit.status === "pending") return;
+    if (!menu || !state.serviceType || blockedByPause || inFlight.current || state.submit.status === "pending") return;
     inFlight.current = true;
     const fresh = uuid();
     const requestId = state.requestId ?? fresh; // retry => identical key
@@ -75,10 +84,8 @@ export function KioskApp({ token }: { token: string }) {
     } catch (err) {
       const e = err instanceof KioskApiError ? err : new KioskApiError("network", "No connection");
       if (e.kind === "unavailable") {
-        const names = state.basket
-          .filter((l) => e.unavailableItemIds.includes(l.menuItemId))
-          .map((l) => l.name);
-        dispatch({ type: "ITEMS_UNAVAILABLE", ids: e.unavailableItemIds, names: [...new Set(names)] });
+        queryClient.setQueryData<KioskMenu>(["kiosk-menu", token], (current) => withReportedMenuPauses(current, e.pausedItems));
+        dispatch({ type: "ITEMS_UNAVAILABLE", ids: e.unavailableItemIds, pausedIds: e.pausedItems.map((item) => item.id) });
         void menuQuery.refetch();
       } else if (e.kind === "network") dispatch({ type: "SUBMIT_FAIL", kind: "network" });
       else if (e.kind === "server") dispatch({ type: "SUBMIT_FAIL", kind: "server" });
@@ -103,7 +110,10 @@ export function KioskApp({ token }: { token: string }) {
 
   const interacting =
     state.step === "service" || state.step === "menu" || state.step === "review";
-  useIdle(interacting && state.submit.status !== "pending" && idleWarn === null, IDLE_MS, () =>
+  // An ambiguous submit outcome is deliberately locked until the guest chooses
+  // Retry (same requestId) or Start over. Auto-resetting here would discard the
+  // idempotency key and let a retry create a second paid order.
+  useIdle(interacting && !isBasketLocked(state) && idleWarn === null, IDLE_MS, () =>
     setIdleWarn(IDLE_WARN_SECONDS),
   );
   useEffect(() => {
@@ -172,6 +182,7 @@ export function KioskApp({ token }: { token: string }) {
         onStart={() => {
           // A real tap: the only moment the browser lets us keep the screen on / go full-screen.
           keepAwake();
+          void menuQuery.refetch();
           if (!document.fullscreenElement) {
             void document.documentElement.requestFullscreen?.({ navigationUI: "hide" }).catch(() => {});
           }
@@ -195,6 +206,7 @@ export function KioskApp({ token }: { token: string }) {
     screen = (
       <MenuScreen
         menu={menu}
+        pauseLabels={pauseLabels}
         basket={state.basket}
         unavailableNames={state.unavailableNames}
         fmt={fmt}
@@ -208,6 +220,8 @@ export function KioskApp({ token }: { token: string }) {
     screen = (
       <ReviewScreen
         menu={menu}
+        pauseLabels={pauseLabels}
+        blockedByPause={blockedByPause}
         basket={state.basket}
         submit={state.submit}
         locked={isBasketLocked(state)}
@@ -282,9 +296,38 @@ export function KioskApp({ token }: { token: string }) {
   );
 }
 
-function Overlay({ children }: { children: React.ReactNode }) {
+function Overlay({ children, onEscape }: { children: React.ReactNode; onEscape?: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = ref.current;
+    dialog?.querySelector<HTMLElement>("button, [tabindex]:not([tabindex='-1'])")?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && onEscape) {
+        e.preventDefault();
+        onEscape();
+      }
+      if (e.key !== "Tab" || !dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>("button:not([disabled]), [tabindex]:not([tabindex='-1'])")];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      previous?.focus();
+    };
+  }, [onEscape]);
   return (
-    <div role="alertdialog" aria-modal="true" className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 p-6">
+    <div ref={ref} role="alertdialog" aria-modal="true" className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 p-6">
       <div className="flex w-full max-w-[40rem] flex-col gap-5 rounded-3xl bg-card p-8 text-center shadow-2xl">
         {children}
       </div>

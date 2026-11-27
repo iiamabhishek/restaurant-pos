@@ -2,6 +2,7 @@
 
 import type {
   BulkTableCreateDto,
+  BulkTableUpdateDto,
   TableDto,
   TableLayoutUpdateDto,
   TableStatusDto,
@@ -23,7 +24,7 @@ export interface RestaurantTable {
   width: number;
   height: number;
   rotation: number;
-  shape: "square" | "round" | "rect";
+  shape: "square" | "round" | "rect" | "booth" | "counter" | "other";
   qrToken: string | null;
   assignedWaiter: { id: string; name: string } | null;
 }
@@ -32,13 +33,15 @@ export interface Floor {
   id: string;
   name: string;
   sortOrder: number;
+  isActive?: boolean;
+  layouts?: { id: string; name: string; isActive: boolean }[];
   tables: RestaurantTable[];
 }
 
-export function useFloors(branchId: string | null) {
+export function useFloors(branchId: string | null, forEditing = false) {
   return useQuery({
-    queryKey: ["floors", branchId],
-    queryFn: () => api.get<Floor[]>(`/tables/floors?branchId=${branchId}`),
+    queryKey: ["floors", branchId, forEditing],
+    queryFn: () => api.get<Floor[]>(`/tables/floors?branchId=${branchId}${forEditing ? "&edit=1" : ""}`),
     enabled: !!branchId,
     refetchInterval: 10_000,
   });
@@ -72,7 +75,7 @@ export function useCreateTable(branchId: string | null) {
 export function useBulkCreateTables(branchId: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (dto: BulkTableCreateDto) => api.post(`/tables/bulk?branchId=${branchId}`, dto),
+    mutationFn: (dto: Omit<BulkTableCreateDto, "columns"> & { columns?: number }) => api.post(`/tables/bulk?branchId=${branchId}`, dto),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["floors", branchId] }),
   });
 }
@@ -118,4 +121,31 @@ export function useRotateQrToken(branchId: string | null) {
     mutationFn: (id: string) => api.post<RestaurantTable>(`/tables/${id}/qr-token?branchId=${branchId}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["floors", branchId] }),
   });
+}
+
+export function useBulkUpdateTables(branchId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (dto: BulkTableUpdateDto) => api.patch(`/tables/bulk?branchId=${branchId}`, dto),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["floors", branchId] }),
+  });
+}
+
+export function useBulkDeleteTables(branchId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: string[]) => api.post(`/tables/bulk-delete?branchId=${branchId}`, { ids }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["floors", branchId] }),
+  });
+}
+
+export function useLayoutActions(branchId: string | null) {
+  const queryClient = useQueryClient();
+  const done = () => queryClient.invalidateQueries({ queryKey: ["floors", branchId] });
+  return {
+    save: useMutation({ mutationFn: (v: { floorId: string; name: string }) => api.post(`/tables/floors/${v.floorId}/layouts?branchId=${branchId}`, { name: v.name }), onSuccess: done }),
+    activate: useMutation({ mutationFn: (id: string) => api.post(`/tables/layouts/${id}/activate?branchId=${branchId}`), onSuccess: done }),
+    overwrite: useMutation({ mutationFn: (id: string) => api.post(`/tables/layouts/${id}/save-current?branchId=${branchId}`), onSuccess: done }),
+    remove: useMutation({ mutationFn: (id: string) => api.delete(`/tables/layouts/${id}?branchId=${branchId}`), onSuccess: done }),
+  };
 }

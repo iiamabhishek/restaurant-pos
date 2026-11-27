@@ -54,7 +54,7 @@ partially built, the note says what's missing.
 | Multiple currencies | Planned | Single `currency` field per restaurant (default INR), no multi-currency checkout |
 | Customer-facing display | Planned | |
 | Receipt printing | Shipped | Self-printing HTML receipt via browser dialog |
-| Digital receipt | Planned | |
+| Digital receipt | Shipped | Guest-facing `/bill/[token]` page opened from a QR/link on the bill or receipt screen (`POST /orders/:id/bill-share`, `GET /v1/public/bill/:token`); signed token expires in 2h, carries the cashier's on-screen discount/tip, no printer or guest login |
 | WhatsApp / SMS / Email receipt | Planned | No messaging integration in codebase |
 
 ## 🪑 Restaurant Table Management
@@ -148,7 +148,7 @@ partially built, the note says what's missing.
 
 | Feature | Status | Note |
 |---|---|---|
-| Customer-facing kiosk route (`/kiosk/<token>`) | Shipped | Public, token-gated, menu + basket only; Spanish-first with English; see [`docs/KIOSK-AND-KDS.md`](./docs/KIOSK-AND-KDS.md) |
+| Customer-facing kiosk route (`/kiosk/<token>`) | Shipped | Public, token-gated, menu + basket only; Spanish by default, with English and Brazilian Portuguese available; see [`docs/KIOSK-AND-KDS.md`](./docs/KIOSK-AND-KDS.md) |
 | Order flow: start → eat here / take away → menu & search → options → basket → review → submit once → order number | Shipped | Server recomputes prices/modifiers/tax; idempotent submit; no personal data collected |
 | Kitchen display per station + kiosk orders in realtime | Shipped | KDS station picker (remembered per device) |
 | Kiosk payment | Planned | Kiosk orders are created unpaid; payment is taken at the counter |
@@ -416,7 +416,7 @@ partially built, the note says what's missing.
 | Feature | Status | Note |
 |---|---|---|
 | Multi-location (schema-level) | Shipped | `Restaurant`→`Branch` from day one, not bolted on |
-| Multi-brand, multi-language, multi-currency | Planned | |
+| Multi-brand, multi-language, multi-currency | Partial | The staff dashboard supports English, Spanish, French and Brazilian Portuguese. Prices use the restaurant's configured currency. |
 | API / Swagger docs | Shipped | Versioned REST (`/api/v1`), Swagger at `/api/docs` |
 | Webhooks, developer portal, app marketplace | Planned | |
 | Advanced audit logs | Partial | AuditLog model exists; no dedicated UI/report over it yet |

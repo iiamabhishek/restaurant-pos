@@ -3,15 +3,19 @@ import {
   Body,
   Controller,
   Get,
+  Param,
   Post,
   Put,
   Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { Auth } from '../common/decorators/auth.decorator';
+import type { SessionUser } from '@nodedr-restaurant/types';
+import { AuditService } from '../audit/audit.service';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { InstanceAuth } from '../common/decorators/instance-auth.decorator';
 import { SyncKeyGuard } from './sync-key.guard';
-import { SyncChange, SyncService } from './sync.service';
+import { SyncService } from './sync.service';
 
 /** Called by other installs (key-authenticated). */
 @ApiTags('sync')
@@ -37,7 +41,7 @@ export class SyncPeerController {
   }
 
   @Post('push')
-  push(@Body() body: { device?: string; changes?: SyncChange[] }) {
+  push(@Body() body: { device?: string; changes?: unknown }) {
     if (!body?.device || !Array.isArray(body.changes))
       throw new BadRequestException('device and changes are required');
     return this.sync.push(body.device, body.changes);
@@ -48,15 +52,95 @@ export class SyncPeerController {
 @ApiTags('sync')
 @Controller('v1/sync')
 export class SyncController {
-  constructor(private readonly sync: SyncService) {}
+  constructor(
+    private readonly sync: SyncService,
+    private readonly audit: AuditService,
+  ) {}
 
-  @Auth('settings.manage')
+  /** Versions that lost a concurrent edit, and flagged anomalies, for manager review. */
+  @InstanceAuth('settings.manage')
+  @Get('conflicts')
+  conflicts(@Query('status') status = 'OPEN') {
+    if (status !== 'OPEN' && status !== 'RESOLVED' && status !== 'ALL')
+      throw new BadRequestException('status must be OPEN, RESOLVED or ALL');
+    return this.sync.listConflicts(status);
+  }
+
+  @InstanceAuth('settings.manage')
+  @Post('conflicts/:id/resolve')
+  async resolve(
+    @Param('id') id: string,
+    @Body() body: { action?: string; reason?: string },
+    @CurrentUser() user: SessionUser,
+  ) {
+    const done = await this.sync.resolveConflict(
+      id,
+      body?.action as 'KEEP_CURRENT' | 'APPLY_LOSER',
+      body?.reason ?? '',
+      user.id,
+    );
+    await this.audit.record({
+      userId: user.id,
+      action: 'SYNC_CONFLICT_RESOLVED',
+      entity: 'sync_conflict',
+      entityId: id,
+      metadata: {
+        resolution: done.action,
+        kind: done.kind,
+        table: done.tbl,
+        record: done.pkKey,
+        reason: (body?.reason ?? '').trim(),
+      },
+    });
+    return done;
+  }
+
+  /** Devices that have synced with this server (server role only). */
+  @InstanceAuth('settings.manage')
+  @Get('peers')
+  peers() {
+    return this.sync.listPeers();
+  }
+
+  @InstanceAuth('settings.manage')
+  @Post('peers/:device/revoke')
+  async revoke(
+    @Param('device') device: string,
+    @CurrentUser() user: SessionUser,
+  ) {
+    await this.sync.setPeerRevoked(device, true);
+    await this.audit.record({
+      userId: user.id,
+      action: 'SYNC_PEER_REVOKED',
+      entity: 'sync_peer',
+      entityId: device,
+    });
+    return { ok: true };
+  }
+
+  @InstanceAuth('settings.manage')
+  @Post('peers/:device/restore')
+  async restore(
+    @Param('device') device: string,
+    @CurrentUser() user: SessionUser,
+  ) {
+    await this.sync.setPeerRevoked(device, false);
+    await this.audit.record({
+      userId: user.id,
+      action: 'SYNC_PEER_RESTORED',
+      entity: 'sync_peer',
+      entityId: device,
+    });
+    return { ok: true };
+  }
+
+  @InstanceAuth('settings.manage')
   @Get('status')
   status() {
     return this.sync.publicStatus();
   }
 
-  @Auth('settings.manage')
+  @InstanceAuth('settings.manage')
   @Post('test')
   async test(@Body() body: { serverUrl?: string; apiKey?: string }) {
     try {
@@ -68,7 +152,7 @@ export class SyncController {
     }
   }
 
-  @Auth('settings.manage')
+  @InstanceAuth('settings.manage')
   @Put('settings')
   async enable(
     @Body() body: { serverUrl?: string; apiKey?: string; mode?: string },
@@ -85,7 +169,7 @@ export class SyncController {
     return this.sync.publicStatus();
   }
 
-  @Auth('settings.manage')
+  @InstanceAuth('settings.manage')
   @Post('run')
   async run() {
     try {
@@ -98,7 +182,7 @@ export class SyncController {
     }
   }
 
-  @Auth('settings.manage')
+  @InstanceAuth('settings.manage')
   @Post('disable')
   async disable() {
     await this.sync.disable();

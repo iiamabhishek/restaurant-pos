@@ -1,7 +1,8 @@
 "use client";
 
 import { Check } from "lucide-react";
-import { useState } from "react";
+import { PauseBadge } from "@/components/menu/pause-badge";
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n/context";
 import type { KioskMenuItem } from "@/lib/kiosk-api";
 import { cn } from "@/lib/utils";
@@ -17,16 +18,47 @@ export interface ModifierChoice {
 /** Full-screen-ish option picker. Remounted per item (keyed by the parent). */
 export function ModifierSheet({
   item,
+  pauseLabel,
   priceText,
   onCancel,
   onConfirm,
 }: {
   item: KioskMenuItem;
+  pauseLabel?: string;
   priceText: (amount: number) => string;
   onCancel: () => void;
   onConfirm: (choice: ModifierChoice) => void;
 }) {
   const { t } = useI18n();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    dialog?.querySelector<HTMLElement>("button, [tabindex]:not([tabindex='-1'])")?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+      if (e.key !== "Tab" || !dialog) return;
+      const focusable = [...dialog.querySelectorAll<HTMLElement>("button:not([disabled]), [tabindex]:not([tabindex='-1'])")];
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      previous?.focus();
+    };
+  }, [onCancel]);
   const groups = item.modifierGroups.map((g) => g.modifierGroup);
   const [selected, setSelected] = useState<Record<string, string[]>>(() =>
     Object.fromEntries(
@@ -69,6 +101,7 @@ export function ModifierSheet({
 
   return (
     <div
+      ref={dialogRef}
       className="absolute inset-0 z-30 flex items-center justify-center bg-black/55 p-6"
       role="dialog"
       aria-modal="true"
@@ -77,6 +110,7 @@ export function ModifierSheet({
       <div className="flex max-h-full w-full max-w-[44rem] flex-col overflow-hidden rounded-3xl bg-card shadow-2xl">
         <div className="border-b border-border p-6">
           <h2 className="text-[1.75rem] font-bold leading-tight">{item.name}</h2>
+          <PauseBadge label={pauseLabel} />
           <p className="text-[1.1rem] text-muted-foreground">{t("kiosk.modifiers.choose")}</p>
         </div>
         <div className="flex-1 space-y-6 overflow-y-auto p-6">
@@ -148,7 +182,7 @@ export function ModifierSheet({
           <KButton variant="secondary" large onClick={onCancel} className="flex-1">
             {t("kiosk.cancel")}
           </KButton>
-          <KButton large onClick={confirm} className="flex-[2]">
+          <KButton large disabled={!!pauseLabel} onClick={confirm} className="flex-[2]">
             {t("kiosk.modifiers.add")}
           </KButton>
         </div>

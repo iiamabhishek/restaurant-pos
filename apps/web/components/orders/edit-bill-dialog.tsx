@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { Minus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { StatusNote, useNoteToast } from "@/components/ui/status-note";
@@ -14,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { QueryError } from "@/components/ui/query-error";
 import {
   useOrder,
   useRemoveOrderItem,
@@ -22,7 +25,6 @@ import {
 } from "@/hooks/use-orders";
 import { useFloors } from "@/hooks/use-tables";
 import { ApiError } from "@/lib/api";
-import { formatCurrency } from "@/lib/format";
 
 const KITCHEN_STARTED = new Set(["PREPARING", "READY", "SERVED"]);
 
@@ -40,7 +42,9 @@ export function EditBillDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { data: order, isLoading } = useOrder(branchId, open ? orderId : null);
+  const fmt = useStaffFormat();
+  const { t: translate } = useI18n();
+  const { data: order, isLoading, isError, error: loadError, refetch, isFetching } = useOrder(branchId, open ? orderId : null);
   const { data: floors } = useFloors(branchId);
   const updateOrder = useUpdateOrder(branchId);
   const updateItem = useUpdateOrderItem(branchId);
@@ -53,7 +57,7 @@ export function EditBillDialog({
   const [guestName, setGuestName] = useState<string | null>(null);
 
   const fail = (err: unknown) =>
-    setError(err instanceof ApiError ? err.message : "That change could not be saved.");
+    setError(err instanceof ApiError ? err.message : translate("That change could not be saved."));
   const editable = order?.status === "OPEN";
   const startedItems = new Set(
     (order?.kots ?? [])
@@ -76,25 +80,32 @@ export function EditBillDialog({
         if (!next) {
           setError(null);
           setRemoving(null);
+          // Discard an unsaved draft when the dialog closes, otherwise the
+          // next bill opens with the previous guest name/notes and saving
+          // writes the stale values.
+          setNotes(null);
+          setGuestName(null);
         }
         onOpenChange(next);
       }}
     >
       <DialogContent className="max-h-[90dvh] overflow-x-hidden overflow-y-auto sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Edit bill {order ? `#${order.orderNumber}` : ""}</DialogTitle>
+          <DialogTitle>{translate("Edit bill")} {order ? `#${order.orderNumber}` : ""}</DialogTitle>
           <DialogDescription>
-            Totals and tax update automatically. Every change is recorded in the audit log.
+            {translate("Totals and tax update automatically. Every change is recorded in the audit log.")}
           </DialogDescription>
         </DialogHeader>
 
-        {isLoading || !order ? (
+        {isError ? (
+          <QueryError error={loadError} what={translate("this bill")} onRetry={() => void refetch()} retrying={isFetching} />
+        ) : isLoading || !order ? (
           <Skeleton className="h-40 rounded-lg" />
         ) : !editable ? (
           <p className="rounded-lg bg-secondary/60 px-3 py-2 text-sm text-muted-foreground">
             {order.status === "PAID"
-              ? "This bill is paid, so it can't be edited. Use Refund to correct it."
-              : "Only open bills can be edited."}
+              ? translate("This bill is paid, so it can't be edited. Use Refund to correct it.")
+              : translate("Only open bills can be edited.")}
           </p>
         ) : (
           <div className="flex min-w-0 flex-col gap-5">
@@ -114,17 +125,17 @@ export function EditBillDialog({
                           </p>
                         )}
                         {locked && (
-                          <p className="text-xs text-warning">Kitchen has started this — can&apos;t change it</p>
+                          <p className="text-xs text-warning">{translate("Kitchen has started this — can't change it")}</p>
                         )}
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
-                        <span className="mr-2 text-sm tabular-nums">{formatCurrency(item.lineTotal)}</span>
+                        <span className="mr-2 text-sm tabular-nums">{fmt.currency(item.lineTotal)}</span>
                         <Button
                           type="button"
                           variant="outline"
                           size="icon"
                           className="h-8 w-8"
-                          aria-label={`One fewer ${item.nameSnapshot}`}
+                          aria-label={translate("One fewer {nameSnapshot}", { nameSnapshot: item.nameSnapshot })}
                           disabled={locked || item.quantity <= 1 || updateItem.isPending}
                           onClick={() => {
                             setError(null);
@@ -141,7 +152,7 @@ export function EditBillDialog({
                           variant="outline"
                           size="icon"
                           className="h-8 w-8 text-destructive"
-                          aria-label={`Remove ${item.nameSnapshot}`}
+                          aria-label={translate("Remove {nameSnapshot}", { nameSnapshot: item.nameSnapshot })}
                           disabled={locked || order.items.length < 2}
                           onClick={() => {
                             setError(null);
@@ -162,7 +173,7 @@ export function EditBillDialog({
                             { orderId, itemId: item.id, reason: reason.trim() },
                             {
                               onSuccess: () => {
-                                toast.success(`${item.nameSnapshot} removed from the bill`);
+                                toast.success(translate("{nameSnapshot} removed from the bill", { nameSnapshot: item.nameSnapshot }));
                                 setRemoving(null);
                               },
                               onError: fail,
@@ -170,9 +181,7 @@ export function EditBillDialog({
                           );
                         }}
                       >
-                        <Label htmlFor={`rm-${item.id}`} className="text-xs">
-                          Remove {item.quantity}× {item.nameSnapshot}? Reason
-                        </Label>
+                        <Label htmlFor={`rm-${item.id}`} className="text-xs">{translate("Remove {quantity}× {nameSnapshot}? Reason", { quantity: item.quantity, nameSnapshot: item.nameSnapshot })}</Label>
                         <Input
                           id={`rm-${item.id}`}
                           value={reason}
@@ -180,11 +189,11 @@ export function EditBillDialog({
                           maxLength={200}
                           required
                           autoFocus
-                          placeholder="e.g. guest changed their mind"
+                          placeholder={translate("e.g. guest changed their mind")}
                         />
                         <div className="flex justify-end gap-2">
                           <Button type="button" size="sm" variant="outline" onClick={() => setRemoving(null)}>
-                            Keep
+                            {translate("Keep")}
                           </Button>
                           <Button
                             type="submit"
@@ -192,7 +201,7 @@ export function EditBillDialog({
                             variant="destructive"
                             disabled={removeItem.isPending || reason.trim().length === 0}
                           >
-                            {removeItem.isPending ? "Removing…" : "Remove item"}
+                            {removeItem.isPending ? translate("Removing…") : translate("Remove item")}
                           </Button>
                         </div>
                       </form>
@@ -202,18 +211,17 @@ export function EditBillDialog({
               })}
             </div>
             <p className="text-xs text-muted-foreground">
-              To add more food, use <span className="font-medium text-foreground">Add another round</span> so the
-              kitchen gets a new ticket.
+              {translate("To add more food, use")} <span className="font-medium text-foreground">{translate("Add another round")}</span> {translate("so the kitchen gets a new ticket.")}
             </p>
 
             <div className="flex items-center justify-between rounded-lg bg-secondary/40 px-3 py-2 text-sm">
-              <span className="text-muted-foreground">Total (incl. {formatCurrency(order.taxAmount)} tax)</span>
-              <span className="font-semibold tabular-nums">{formatCurrency(order.totalAmount)}</span>
+              <span className="text-muted-foreground">{translate("Total (incl. {formatCurrency} tax)", { formatCurrency: fmt.currency(order.taxAmount) })}</span>
+              <span className="font-semibold tabular-nums">{fmt.currency(order.totalAmount)}</span>
             </div>
 
             {order.type === "DINE_IN" && (
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="move-table">Move to another table</Label>
+                <Label htmlFor="move-table">{translate("Move to another table")}</Label>
                 <select
                   id="move-table"
                   className="h-10 w-full min-w-0 truncate rounded-lg border border-input bg-background px-3 text-sm"
@@ -226,7 +234,7 @@ export function EditBillDialog({
                     updateOrder.mutate(
                       { orderId, dto: { tableId } },
                       {
-                        onSuccess: () => toast.success("Bill moved — both tables updated"),
+                        onSuccess: () => toast.success(translate("Bill moved — both tables updated")),
                         onError: fail,
                       },
                     );
@@ -234,12 +242,12 @@ export function EditBillDialog({
                 >
                   <option value="">
                     {freeTables.length === 0
-                      ? "No free table available"
-                      : `Currently ${order.table ? (order.table.name ?? `Table ${order.table.number}`) : "no table"} — choose a free table`}
+                      ? translate("No free table available")
+                      : translate("Currently {value} — choose a free table", { value: order.table ? (order.table.name ?? `Table ${order.table.number}`) : translate("no table") })}
                   </option>
                   {freeTables.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {t.name ?? `Table ${t.number}`}
+                      {t.name ?? translate("Table {number}", { number: t.number })}
                     </option>
                   ))}
                 </select>
@@ -259,12 +267,12 @@ export function EditBillDialog({
                       notes: (notes ?? order.notes ?? "").trim() || null,
                     },
                   },
-                  { onSuccess: () => toast.success("Bill details saved"), onError: fail },
+                  { onSuccess: () => toast.success(translate("Bill details saved")), onError: fail },
                 );
               }}
             >
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="bill-guest">Guest name</Label>
+                <Label htmlFor="bill-guest">{translate("Guest name")}</Label>
                 <Input
                   id="bill-guest"
                   value={guestName ?? order.guestName ?? ""}
@@ -273,7 +281,7 @@ export function EditBillDialog({
                 />
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="bill-notes">Note</Label>
+                <Label htmlFor="bill-notes">{translate("Note")}</Label>
                 <Input
                   id="bill-notes"
                   value={notes ?? order.notes ?? ""}
@@ -282,7 +290,7 @@ export function EditBillDialog({
                 />
               </div>
               <Button type="submit" variant="outline" disabled={updateOrder.isPending}>
-                {updateOrder.isPending ? "Saving…" : "Save details"}
+                {updateOrder.isPending ? translate("Saving…") : translate("Save details")}
               </Button>
             </form>
 

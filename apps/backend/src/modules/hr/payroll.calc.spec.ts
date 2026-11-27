@@ -1,3 +1,4 @@
+import { round2 } from './payroll.calc';
 import { computePayroll, daysInclusive, daysInMonthOf } from './payroll.calc';
 
 describe('payroll maths', () => {
@@ -140,5 +141,322 @@ describe('netWithAdjustments', () => {
     expect(() =>
       netWithAdjustments(base, { ...none, advanceRecovery: 40000 }),
     ).toThrow(/more than the pay/);
+  });
+});
+
+import { monthSlices, workedHours } from './payroll.calc';
+
+describe('payroll boundaries', () => {
+  const H = 3_600_000;
+  const t = (iso: string) => Date.parse(iso);
+
+  it('prices each calendar month by its own length', () => {
+    // 15 Jan to 13 Feb: 17/31 + 13/28 of a month, not 30/31
+    const [line] = computePayroll('2026-01-15', '2026-02-13', 0, [
+      {
+        userId: 'a',
+        payType: 'MONTHLY',
+        rate: 31000,
+        hoursWorked: 0,
+        unpaidLeaveDays: 0,
+      },
+    ]);
+    expect(line.basePay).toBe(round2((31000 * 17) / 31 + (31000 * 13) / 28));
+    expect(monthSlices('2026-01-15', '2026-02-13')).toEqual([
+      { key: '2026-01', days: 17, monthDays: 31 },
+      { key: '2026-02', days: 13, monthDays: 28 },
+    ]);
+  });
+
+  it('a whole calendar month is exactly the rate in every month, leap year included', () => {
+    for (const [a, b] of [
+      ['2026-02-01', '2026-02-28'],
+      ['2028-02-01', '2028-02-29'],
+      ['2026-04-01', '2026-04-30'],
+      ['2026-12-01', '2026-12-31'],
+    ]) {
+      const [l] = computePayroll(a, b, 0, [
+        {
+          userId: 'a',
+          payType: 'MONTHLY',
+          rate: 30000,
+          hoursWorked: 0,
+          unpaidLeaveDays: 0,
+        },
+      ]);
+      expect(l.basePay).toBe(30000);
+    }
+  });
+
+  it('prices unpaid leave by the month the leave day is in', () => {
+    const [l] = computePayroll('2026-02-01', '2026-03-31', 0, [
+      {
+        userId: 'a',
+        payType: 'MONTHLY',
+        rate: 28000,
+        hoursWorked: 0,
+        unpaidLeaveDays: 2,
+        unpaidLeaveByMonth: { '2026-02': 1, '2026-03': 1 },
+      },
+    ]);
+    expect(l.unpaidLeaveDeduction).toBe(round2(28000 / 28 + 28000 / 31));
+  });
+
+  it('merges duplicate and overlapping attendance so a minute is paid once', () => {
+    const rows = [
+      { start: t('2026-03-02T09:00:00Z'), end: t('2026-03-02T17:00:00Z') },
+      { start: t('2026-03-02T09:00:00Z'), end: t('2026-03-02T17:00:00Z') }, // same row twice
+      { start: t('2026-03-02T16:00:00Z'), end: t('2026-03-02T18:00:00Z') }, // overlaps the end
+    ];
+    const w = workedHours(
+      rows,
+      t('2026-03-02T00:00:00Z'),
+      t('2026-03-03T00:00:00Z'),
+    );
+    expect(w.hours).toBe(9);
+    expect(w.overlaps).toBe(2);
+  });
+
+  it('clips a night shift to the period and drops rows that are outside it', () => {
+    const from = t('2026-03-01T00:00:00Z');
+    const to = t('2026-03-02T00:00:00Z');
+    const w = workedHours(
+      [
+        { start: t('2026-02-28T22:00:00Z'), end: t('2026-03-01T06:00:00Z') }, // 6 h inside
+        { start: t('2026-03-02T01:00:00Z'), end: t('2026-03-02T05:00:00Z') }, // outside
+      ],
+      from,
+      to,
+    );
+    expect(w.hours).toBe(6);
+  });
+
+  it('missing attendance means zero hours, not scheduled hours', () => {
+    const [l] = computePayroll('2026-03-01', '2026-03-31', 0, [
+      {
+        userId: 'a',
+        payType: 'HOURLY',
+        rate: 200,
+        hoursWorked: workedHours([], 0, 9e15).hours,
+        unpaidLeaveDays: 0,
+      },
+    ]);
+    expect(l.basePay).toBe(0);
+    expect(l.netPay).toBe(0);
+  });
+
+  it('rounds half-up to 2 dp and the tip pool still sums exactly', () => {
+    const out = computePayroll('2026-03-01', '2026-03-31', 100, [
+      {
+        userId: 'a',
+        payType: 'HOURLY',
+        rate: 100.005,
+        hoursWorked: 1,
+        unpaidLeaveDays: 0,
+      },
+      {
+        userId: 'b',
+        payType: 'HOURLY',
+        rate: 10,
+        hoursWorked: 1,
+        unpaidLeaveDays: 0,
+      },
+      {
+        userId: 'c',
+        payType: 'HOURLY',
+        rate: 10,
+        hoursWorked: 1,
+        unpaidLeaveDays: 0,
+      },
+    ]);
+    expect(out.reduce((s, l) => s + l.tipShare, 0)).toBeCloseTo(100, 10);
+    expect(out[0].basePay).toBe(100.01);
+  });
+
+  it('zero rate and zero hours give zero, never negative', () => {
+    const [l] = computePayroll('2026-03-01', '2026-03-31', 0, [
+      {
+        userId: 'a',
+        payType: 'MONTHLY',
+        rate: 0,
+        hoursWorked: 0,
+        unpaidLeaveDays: 3,
+      },
+    ]);
+    expect(l.netPay).toBe(0);
+    expect(H).toBe(3_600_000);
+  });
+});
+
+import { workedByDay } from './payroll.calc';
+
+describe('breaks and overtime', () => {
+  const t = (iso: string) => Date.parse(iso);
+  const date = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  const day = (a: string, b: string, breakMinutes = 0) => ({
+    start: t(a),
+    end: t(b),
+    breakMinutes,
+  });
+
+  it('takes the unpaid break off the paid hours', () => {
+    const w = workedByDay(
+      [day('2026-03-02T04:00:00Z', '2026-03-02T13:00:00Z', 60)],
+      0,
+      9e15,
+      date,
+    );
+    expect(w.hours).toBe(8);
+  });
+
+  it('counts a duplicated shift and its break once', () => {
+    const r = day('2026-03-02T04:00:00Z', '2026-03-02T13:00:00Z', 30);
+    expect(workedByDay([r, r], 0, 9e15, date).hours).toBe(8.5);
+  });
+
+  it('pays overtime per day above the threshold at the multiplier', () => {
+    const [l] = computePayroll('2026-03-01', '2026-03-31', 0, [
+      {
+        userId: 'a',
+        payType: 'HOURLY',
+        rate: 100,
+        hoursWorked: 19,
+        dailyHours: [10, 9],
+        overtimeAfterHours: 8,
+        overtimeMultiplier: 1.5,
+        unpaidLeaveDays: 0,
+      },
+    ]);
+    expect(l.overtimeHours).toBe(3); // 2 + 1
+    expect(l.overtimePay).toBe(450);
+    expect(l.basePay).toBe(1600 + 450);
+    expect(l.formula).toHaveLength(2);
+  });
+
+  it('exactly at the threshold is not overtime; no rule means no overtime', () => {
+    const base = {
+      userId: 'a',
+      payType: 'HOURLY' as const,
+      rate: 100,
+      hoursWorked: 16,
+      dailyHours: [8, 8],
+      unpaidLeaveDays: 0,
+    };
+    expect(
+      computePayroll('2026-03-01', '2026-03-31', 0, [
+        { ...base, overtimeAfterHours: 8 },
+      ])[0].overtimeHours,
+    ).toBe(0);
+    const none = computePayroll('2026-03-01', '2026-03-31', 0, [
+      { ...base, dailyHours: [12, 4] },
+    ])[0];
+    expect(none.overtimeHours).toBe(0);
+    expect(none.basePay).toBe(1600);
+  });
+
+  it('a midnight-crossing shift belongs to the day it started', () => {
+    const w = workedByDay(
+      [day('2026-03-02T20:00:00Z', '2026-03-03T04:00:00Z')],
+      0,
+      9e15,
+      date,
+    );
+    expect([...w.byDay.keys()]).toEqual(['2026-03-02']);
+    expect(w.hours).toBe(8);
+  });
+
+  it('shows how monthly pay was reached', () => {
+    const [l] = computePayroll('2026-02-01', '2026-02-28', 0, [
+      {
+        userId: 'a',
+        payType: 'MONTHLY',
+        rate: 28000,
+        hoursWorked: 0,
+        unpaidLeaveDays: 0,
+      },
+    ]);
+    expect(l.formula[0]).toBe('2026-02: 28000 x 28/28 days = 28000');
+  });
+});
+
+import { lateAndAbsence } from './payroll.calc';
+
+describe('late and absence', () => {
+  const t = (iso: string) => Date.parse(iso);
+  const day = (date: string, from: string, to: string) => ({
+    start: t(`${date}T${from}:00Z`),
+    end: t(`${date}T${to}:00Z`),
+    date,
+  });
+  const opts = (over = {}) => ({
+    graceMinutes: 10 as number | null,
+    deductAbsence: true,
+    dayRate: () => 1000,
+    ...over,
+  });
+
+  it('within grace costs nothing; beyond it deducts the lateness pro rata of the shift', () => {
+    const shifts = [
+      day('2026-03-02', '09:00', '17:00'),
+      day('2026-03-03', '09:00', '17:00'),
+    ];
+    const clocks = [
+      { start: t('2026-03-02T09:08:00Z'), end: t('2026-03-02T17:00:00Z') }, // 8 min: inside grace
+      { start: t('2026-03-03T09:48:00Z'), end: t('2026-03-03T17:00:00Z') }, // 48 min of 480
+    ];
+    const r = lateAndAbsence(shifts, clocks, new Set(), opts());
+    expect(r.lateMinutes).toBe(48);
+    expect(r.lateDeduction).toBe(100); // 1000 x 48/480
+    expect(r.absentDays).toBe(0);
+  });
+
+  it('a rostered day with no clock-in is absent unless on approved leave', () => {
+    const shifts = [
+      day('2026-03-02', '09:00', '17:00'),
+      day('2026-03-03', '09:00', '17:00'),
+    ];
+    const r = lateAndAbsence(shifts, [], new Set(['2026-03-03']), opts());
+    expect(r.absentDays).toBe(1);
+    expect(r.absenceDeduction).toBe(1000);
+  });
+
+  it('both rules are off by default and an open (not clocked out) shift still counts as present', () => {
+    const shifts = [day('2026-03-02', '09:00', '17:00')];
+    const off = lateAndAbsence(
+      shifts,
+      [],
+      new Set(),
+      opts({ graceMinutes: null, deductAbsence: false }),
+    );
+    expect(off.absenceDeduction + off.lateDeduction).toBe(0);
+    const open = lateAndAbsence(
+      shifts,
+      [{ start: t('2026-03-02T09:00:00Z'), end: null }],
+      new Set(),
+      opts(),
+    );
+    expect(open.absentDays).toBe(0);
+  });
+
+  it('flows into net pay and the formula lines', () => {
+    const late = lateAndAbsence(
+      [day('2026-03-02', '09:00', '17:00')],
+      [],
+      new Set(),
+      opts(),
+    );
+    const [l] = computePayroll('2026-03-01', '2026-03-31', 0, [
+      {
+        userId: 'a',
+        payType: 'MONTHLY',
+        rate: 31000,
+        hoursWorked: 0,
+        unpaidLeaveDays: 0,
+        late,
+      },
+    ]);
+    expect(l.absenceDeduction).toBe(1000);
+    expect(l.netPay).toBe(30000);
+    expect(l.formula.join(' ')).toMatch(/absent/);
   });
 });

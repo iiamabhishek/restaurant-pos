@@ -36,10 +36,17 @@ export async function gatewayFetch<T>(
     json = null;
   }
   if (!res.ok) {
-    throw new GatewayError(
-      providerMessage(json) ?? `The provider answered HTTP ${res.status}`,
-      res.status,
-    );
+    const message =
+      providerMessage(json) ?? `The provider answered HTTP ${res.status}`;
+    // A rate limit or a server error says nothing about whether the request
+    // was processed: the provider may have taken the money/refund before the
+    // connection broke. Per the adapter contract, only a *definite* rejection
+    // carries a status; ambiguous answers must not let callers finalise a
+    // failure and release a refund hold that is still needed.
+    if (res.status === 429 || res.status >= 500) {
+      throw new GatewayError(message);
+    }
+    throw new GatewayError(message, res.status);
   }
   return json as T;
 }

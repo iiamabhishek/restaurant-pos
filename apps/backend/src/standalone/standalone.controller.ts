@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Post, Query, UsePipes } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Post,
+  Query,
+  UsePipes,
+} from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import type { SessionUser } from '@nodedr-restaurant/types';
 import { Auth } from '../common/decorators/auth.decorator';
@@ -8,10 +16,19 @@ import { BranchAccessService } from '../common/services/branch-access.service';
 import { Throttle } from '@nestjs/throttler';
 import { StandaloneReservationsService } from './standalone-reservations.service';
 import { StandaloneService } from './standalone.service';
+import { StandaloneBooksService } from './standalone-books.service';
 import {
   offlineSalesSchema,
+  phoneCollectionSchema,
+  phoneExpenseSchema,
+  phoneRefundSchema,
+  phoneTillClosingSchema,
   reservationSyncSchema,
   type OfflineSalesDto,
+  type PhoneCollectionDto,
+  type PhoneExpenseDto,
+  type PhoneRefundDto,
+  type PhoneTillClosingDto,
   type ReservationSyncDto,
 } from './standalone.schema';
 
@@ -28,6 +45,7 @@ export class StandaloneController {
     private readonly standalone: StandaloneService,
     private readonly bookings: StandaloneReservationsService,
     private readonly branchAccess: BranchAccessService,
+    private readonly books: StandaloneBooksService,
   ) {}
 
   // Everything the phone needs to sell without the server.
@@ -39,6 +57,18 @@ export class StandaloneController {
   ) {
     await this.branchAccess.assertAccess(user.restaurantId, branchId);
     return this.standalone.snapshot(user, branchId);
+  }
+
+  @Auth('orders.create')
+  @Get('menu-pauses')
+  async menuPauses(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+  ) {
+    if (typeof branchId !== 'string' || !branchId)
+      throw new BadRequestException('branchId is required');
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    return this.standalone.menuPauses(branchId);
   }
 
   // Sales taken offline. One result per sale: created, duplicate or refused.
@@ -67,5 +97,72 @@ export class StandaloneController {
   ) {
     await this.branchAccess.assertAccess(user.restaurantId, branchId);
     return this.bookings.sync(branchId, body as ReservationSyncDto);
+  }
+
+  // ------------------------------------------------------------ phone books ---
+  // Each takes the phone's event id (idempotencyKey); a repeat returns the first result.
+
+  @Auth('refunds.process')
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  @Post('refunds')
+  @UsePipes(new ZodValidationPipe(phoneRefundSchema))
+  async refund(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+    @Body() body: unknown,
+  ) {
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    return this.books.refund(user, branchId, body as PhoneRefundDto);
+  }
+
+  @Auth('accounting.manage')
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  @Post('expenses')
+  @UsePipes(new ZodValidationPipe(phoneExpenseSchema))
+  async expense(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+    @Body() body: unknown,
+  ) {
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    return this.books.expense(user, branchId, body as PhoneExpenseDto);
+  }
+
+  // Money taken later on a bill the guest left due.
+  @Auth('bills.print')
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  @Post('collections')
+  @UsePipes(new ZodValidationPipe(phoneCollectionSchema))
+  async collect(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+    @Body() body: unknown,
+  ) {
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    return this.books.collect(user, branchId, body as PhoneCollectionDto);
+  }
+
+  // A phone's own cash drawer counted at the end of its day.
+  @Auth('bills.print')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @Post('till-closings')
+  @UsePipes(new ZodValidationPipe(phoneTillClosingSchema))
+  async tillClosing(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+    @Body() body: unknown,
+  ) {
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    return this.books.tillClosing(user, branchId, body as PhoneTillClosingDto);
+  }
+
+  @Auth('accounting.manage')
+  @Get('till-closings')
+  async tillClosings(
+    @CurrentUser() user: SessionUser,
+    @Query('branchId') branchId: string,
+  ) {
+    await this.branchAccess.assertAccess(user.restaurantId, branchId);
+    return this.books.listTillClosings(branchId);
   }
 }

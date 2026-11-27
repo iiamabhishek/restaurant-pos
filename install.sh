@@ -15,14 +15,31 @@
 # own restaurant at /signup — no demo data is created.
 
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
 
+usage() {
+  printf '%s\n' 'Usage: ./install.sh [--demo] [-h|--help]' \
+    '  --demo      Load the sample restaurant after the app is ready.' \
+    '  -h, --help  Show this help and exit.'
+}
+
+show_help=false
 load_demo=false
 for arg in "$@"; do
   case "$arg" in
     --demo) load_demo=true ;;
+    -h|--help) show_help=true ;;
+    *)
+      printf 'Unknown argument: %s\n' "$arg" >&2
+      usage >&2
+      exit 2
+      ;;
   esac
 done
+if [ "$show_help" = true ]; then
+  usage
+  exit 0
+fi
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 # --- 1. Check prerequisites -------------------------------------------------
 # Docker Engine must be installed and the `docker compose` plugin available
@@ -62,18 +79,21 @@ if [ ! -f .env ]; then
   if command -v openssl >/dev/null 2>&1; then
     jwt_secret="$(openssl rand -hex 32)"
     pg_password="$(openssl rand -hex 16)"
+    updater_token="$(openssl rand -hex 24)"
   else
     jwt_secret="$(head -c48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c64)"
     pg_password="$(head -c24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c32)"
+    updater_token="$(head -c32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c48)"
   fi
   cat > .env <<EOF
 POSTGRES_PASSWORD=${pg_password}
 JWT_SECRET=${jwt_secret}
+UPDATER_TOKEN=${updater_token}
 FRONTEND_ORIGIN=http://localhost:1995
 HOST_PORT=1995
 COOKIE_SECURE=false
 EOF
-  echo ".env created with a generated POSTGRES_PASSWORD and JWT_SECRET."
+  echo ".env created with generated POSTGRES_PASSWORD, JWT_SECRET and UPDATER_TOKEN."
 fi
 
 # --- 3. Build the images and start the stack --------------------------------
@@ -83,17 +103,32 @@ docker compose up -d --build
 # --- 4. Wait for the app to report healthy ----------------------------------
 # The backend container's own start command runs `prisma migrate deploy`
 # before it starts listening, so a 200 here means migrations already applied.
-HOST_PORT="$(grep -m1 '^HOST_PORT=' .env 2>/dev/null | cut -d= -f2-)"
-HOST_PORT="${HOST_PORT:-1995}"
+# Ask Compose for the actual host binding, which can differ from HOST_PORT in .env.
+web_binding="$(docker compose port web 3000 2>/dev/null || true)"
+web_port="${web_binding##*:}"
+if [ -z "$web_port" ]; then
+  # Let Compose resolve shell overrides, .env quoting and interpolation.
+  if ! web_port="$(docker compose config --environment 2>/dev/null | sed -n 's/^HOST_PORT=//p')"; then
+    # Older Compose versions lack --environment. Support the installer's plain KEY=value file.
+    web_port="${HOST_PORT-$(sed -n 's/^HOST_PORT=//p' .env | tail -n 1)}"
+  fi
+  web_port="${web_port:-1995}"
+fi
+web_url="http://localhost:${web_port}"
 
 echo "Waiting for the app to come online..."
 ready=false
-for _ in $(seq 1 90); do
-  if curl -sf "http://localhost:${HOST_PORT}/api/health" >/dev/null 2>&1; then
+deadline=$((SECONDS + 90))
+while :; do
+  remaining=$((deadline - SECONDS))
+  if (( remaining <= 0 )); then break; fi
+  # A stalled request gets at most five seconds, including the time spent connecting.
+  probe_timeout=$((remaining < 5 ? remaining : 5))
+  if curl -sf --max-time "$probe_timeout" "$web_url/api/health" >/dev/null 2>&1; then
     ready=true
     break
   fi
-  sleep 1
+  if (( SECONDS < deadline )); then sleep 1; fi
 done
 
 if [ "$ready" != "true" ]; then
@@ -113,10 +148,10 @@ fi
 # --- 6. Done -----------------------------------------------------------------
 echo ""
 echo "Nodedr OrderRestro is up and running."
-echo "Open http://localhost:${HOST_PORT}"
+echo "Open $web_url"
 if [ "$load_demo" = true ]; then
   echo "Sign in with the demo account: owner@demo.local / Password123!"
   echo "(demo account — change the password or remove it before real use)"
 else
-  echo "Create your restaurant account at http://localhost:${HOST_PORT}/signup"
+  echo "Create your restaurant account at $web_url/signup"
 fi

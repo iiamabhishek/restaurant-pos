@@ -72,6 +72,13 @@ model Restaurant {
   // Referral rewards. Off until the owner turns it on. Both rewards are paid
   // only after the referred customer's first qualifying (paid) purchase.
   referralEnabled        Boolean @default(false)
+  // Manufacturing journal: production batches with costs, the POS card, and cost reports. Off until an admin turns it on.
+  manufacturingEnabled   Boolean @default(false)
+  // Dine-in orders from the table QR need the live table-session code that staff open (default on).
+  requireTableSession    Boolean @default(true)
+  // Advanced table ordering, both off by default so a small restaurant keeps the simple QR + code flow.
+  nfcTablesEnabled       Boolean @default(false) // secure NFC tags (NTAG 424 DNA) may be used to open a table's menu
+  autoTableSessions      Boolean @default(false) // the first valid guest order opens the table session; settling closes it
   referralSharerPoints   Int     @default(15)
   referralReferredPoints Int     @default(10)
   // Food value (bill subtotal) the referred customer's first purchase must reach for the rewards to pay.
@@ -116,6 +123,8 @@ model Branch {
   leaveRequests     LeaveRequest[]
   payrollRuns       PayrollRun[]
   expenses          Expense[]
+  pettyCashEntries  PettyCashEntry[]
+  purchaseReturns   PurchaseReturn[]
   budgets           Budget[]
   bankTransactions  BankTransaction[]
   reportSchedules   ReportSchedule[]
@@ -179,6 +188,7 @@ model Branch {
   updatedAt DateTime @updatedAt
 
   floors          Floor[]
+  nfcTags         NfcTag[]
   users           UserBranch[]
   menuItems       MenuItem[]
   categories      MenuCategory[]
@@ -203,6 +213,20 @@ model Branch {
   supplierPayments   SupplierPayment[]
   notifications      Notification[]
   integrationApiKeys IntegrationApiKey[]
+
+  menuItemCostings    MenuItemCosting[]
+  productionEntries   ProductionEntry[]
+  buzzers             Buzzer[]
+  displayTerminals    DisplayTerminal[]
+  displayAds          DisplayAd[]
+  stockTakes          StockTake[]
+  stockLocations      StockLocation[]
+  wasteEntries        WasteEntry[]
+  stockJournalEntries StockJournalEntry[]
+  preparations        Preparation[]
+  productionRuns      ProductionRun[]
+  productRecipes      ProductRecipe[]
+  phoneTillClosings   PhoneTillClosing[]
 
   @@index([restaurantId])
   @@map("branches")
@@ -311,12 +335,14 @@ model User {
   phone                   String?
   passwordHash            String
   pinHash                 String? // quick-switch PIN login on a shared terminal
-  isActive                Boolean  @default(true)
+  isActive                Boolean   @default(true)
   // Personal dashboard layout (widget order/visibility, reporting window).
   dashboardPrefs          Json?
   twoFactorSecret         String? // AES-GCM sealed TOTP secret (see auth/totp.ts)
-  twoFactorEnabled        Boolean  @default(false)
-  twoFactorRecoveryHashes String[] @default([]) // bcrypt hashes of unused one-time recovery codes
+  twoFactorEnabled        Boolean   @default(false)
+  twoFactorRecoveryHashes String[]  @default([]) // bcrypt hashes of unused one-time recovery codes
+  // Sessions issued at or before this moment are dead (set when an admin changes the password).
+  sessionsValidFrom       DateTime?
   twoFactorLastStep       Int? // last accepted TOTP step: a code works once
 
   // Delivery rider app: on duty, and the last position the rider's phone reported.
@@ -334,20 +360,24 @@ model User {
   auditLogs     AuditLog[]
   refundsIssued Refund[]
   notifications Notification[] @relation("NotificationRecipient")
+  posDevices    PosDevice[]
   deviceTokens  DeviceToken[]
 
-  purchaseOrdersCreated PurchaseOrder[] @relation("PurchaseOrderCreatedBy")
-  goodsReceiptsReceived GoodsReceipt[]  @relation("GoodsReceiptReceivedBy")
-  stockMovementsCreated StockMovement[] @relation("StockMovementCreatedBy")
-  wasteLogsCreated      WasteLog[]      @relation("WasteLogCreatedBy")
-  attendance            Attendance[]
-  deliveriesDriven      Order[]         @relation("OrderDriver")
-  shifts                Shift[]
-  leaveRequests         LeaveRequest[]  @relation("LeaveRequester")
-  leaveDecided          LeaveRequest[]  @relation("LeaveDecider")
-  payProfile            StaffPay?
-  payrollLines          PayrollLine[]
-  expensesCreated       Expense[]
+  purchaseOrdersCreated   PurchaseOrder[]      @relation("PurchaseOrderCreatedBy")
+  goodsReceiptsReceived   GoodsReceipt[]       @relation("GoodsReceiptReceivedBy")
+  stockMovementsCreated   StockMovement[]      @relation("StockMovementCreatedBy")
+  wasteLogsCreated        WasteLog[]           @relation("WasteLogCreatedBy")
+  attendance              Attendance[]
+  deliveriesDriven        Order[]              @relation("OrderDriver")
+  deliveryAssignmentsMade DeliveryAssignment[] @relation("DeliveryAssignmentBy")
+  shifts                  Shift[]
+  leaveRequests           LeaveRequest[]       @relation("LeaveRequester")
+  leaveDecided            LeaveRequest[]       @relation("LeaveDecider")
+  payProfile              StaffPay?
+  payrollLines            PayrollLine[]
+  expensesCreated         Expense[]
+  pettyCashEntries        PettyCashEntry[]     @relation("PettyCashEntryBy")
+  purchaseReturns         PurchaseReturn[]     @relation("PurchaseReturnBy")
 
   purchaseRequestsRequested PurchaseRequest[]   @relation("PurchaseRequestRequestedBy")
   purchaseRequestsApproved  PurchaseRequest[]   @relation("PurchaseRequestApprovedBy")
@@ -508,6 +538,7 @@ model Backup {
   s3KeyDb      String?
   s3KeyUploads String?
   sha256       String?
+  sha256Uploads String?
 
   // Null for scheduled/cron-triggered runs (see backup.service.ts's
   // @Cron job) — only manual triggers have an actor.
@@ -542,6 +573,19 @@ model BackupConfig {
   @@map("backup_config")
 }
 
+// One instance-wide schedule for either database or environment S3 credentials.
+// Null overrides inherit the existing interval and retention configuration.
+model BackupScheduleState {
+  id              String    @id @default("singleton")
+  schedule        Json?
+  retainCount     Int?
+  nextScheduledAt DateTime?
+  lastAttemptId   String?
+  leaseUntil      DateTime?
+
+  @@map("backup_schedule_state")
+}
+
 // ---------------------------------------------------------------------------
 // Floor & Table management
 // ---------------------------------------------------------------------------
@@ -560,9 +604,11 @@ model Floor {
   branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
   name      String
-  sortOrder Int    @default(0)
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
 
-  tables Table[]
+  tables  Table[]
+  layouts FloorLayout[]
 
   @@index([branchId])
   @@map("floors")
@@ -594,6 +640,9 @@ model Table {
   shape    String  @default("square") // square | round | rect
   color    String?
 
+  // Hidden by the active floor layout (not part of it). Orders keep pointing at the table.
+  hidden Boolean @default(false)
+
   assignedWaiterId String?
   assignedWaiter   User?   @relation("TableWaiter", fields: [assignedWaiterId], references: [id], onDelete: SetNull)
 
@@ -608,6 +657,8 @@ model Table {
   updatedAt DateTime @updatedAt
 
   requests TableRequest[]
+  nfcTags  NfcTag[]
+  accesses TableAccess[]
 
   @@unique([floorId, number])
   @@index([floorId])
@@ -704,17 +755,49 @@ model Ingredient {
   currentStock Decimal @default(0) @db.Decimal(12, 3)
   costPerUnit  Decimal @default(0) @db.Decimal(12, 4) // weighted-average cost
 
+  // Recipe costing (additive; defaults keep every existing ingredient behaving as before).
+  // kind PREPARED = a sauce/dough/spice mix made in-house by `preparation`; it is stocked and
+  // consumed like any ingredient, so production consumes raw stock and sales consume this stock.
+  kind             IngredientKind       @default(PURCHASED)
+  costMethod       IngredientCostMethod @default(AVERAGE)
+  purchaseQuantity Decimal?             @db.Decimal(12, 3)
+  purchaseUnit     IngredientUnit?
+  purchasePrice    Decimal?             @db.Decimal(12, 2)
+  // Usable yield: % of the purchased quantity left after trimming. The ONE place wastage lives.
+  yieldPercent     Decimal              @default(100) @db.Decimal(5, 2)
+  // Ingredient-specific unit bridges, e.g. [{"unit":"G","per":920}] = 1 stock unit is 920 g.
+  conversions      Json                 @default("[]")
+  version          Int                  @default(1)
+
+  // Stock journal (additive). category/storageLocation are plain labels; a waste entry bigger than
+  // wasteApprovalQty (in this item's stock unit) waits for a manager, null = never needs approval.
+  category         String?
+  storageLocation  String?
+  wasteApprovalQty Decimal? @db.Decimal(12, 3)
+  // Stock to bring the item back up to when ordering (shopping list). null = twice the minimum.
+  parLevel         Decimal? @db.Decimal(12, 3)
+
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  recipeLines        RecipeIngredient[]
-  directMenuItems    MenuItem[]          @relation("DirectStockItem")
-  purchaseOrderItems PurchaseOrderItem[]
-  goodsReceiptItems  GoodsReceiptItem[]
-  stockBatches       StockBatch[]
-  stockMovements     StockMovement[]
-  wasteLogs          WasteLog[]
+  productionLines     ProductionLine[]
+  stockJournalLines   StockJournalLine[]
+  stockLevels         StockLevel[]
+  wasteEntries        WasteEntry[]
+  preparation         Preparation?
+  preparationLines    PreparationLine[]
+  modifierLines       ModifierIngredient[]
+  recipeLines         RecipeIngredient[]
+  productRecipes      ProductRecipe[]
+  productRecipeLines  ProductRecipeLine[]
+  directMenuItems     MenuItem[]           @relation("DirectStockItem")
+  purchaseOrderItems  PurchaseOrderItem[]
+  goodsReceiptItems   GoodsReceiptItem[]
+  purchaseReturnItems PurchaseReturnItem[]
+  stockBatches        StockBatch[]
+  stockMovements      StockMovement[]
+  wasteLogs           WasteLog[]
 
   purchaseRequestItems   PurchaseRequestItem[]
   supplierQuotationItems SupplierQuotationItem[]
@@ -731,13 +814,131 @@ model RecipeIngredient {
   ingredientId String
   ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
 
-  quantity  Decimal  @db.Decimal(12, 3) // in ingredient.unit
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  quantity  Decimal         @db.Decimal(12, 3) // USABLE quantity per recipe batch, in `unit`
+  // null = the ingredient's own stock unit (every pre-costing row)
+  unit      IngredientUnit?
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
 
   @@unique([menuItemId, ingredientId])
   @@index([menuItemId])
   @@map("recipe_ingredients")
+}
+
+enum IngredientKind {
+  PURCHASED
+  PREPARED
+}
+
+// AVERAGE = reuse the weighted-average inventory valuation (falls back to the manual purchase
+// cost until the first goods receipt); MANUAL = purchase quantity/unit/price entered by hand;
+// RECIPE = a prepared item priced live from its own recipe.
+enum IngredientCostMethod {
+  AVERAGE
+  MANUAL
+  RECIPE
+}
+
+// Costing setup for a finished menu item. `lines` are the existing RecipeIngredient rows;
+// quantities are per BATCH and batchOutputQty is the portions one batch makes.
+model MenuItemCosting {
+  id         String   @id @default(cuid())
+  branchId   String
+  branch     Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  menuItemId String   @unique
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+
+  batchOutputQty      Decimal   @default(1) @db.Decimal(12, 3)
+  overheads           Json      @default("[]") // [{kind,label,amount,basis}]
+  halfPortionRatio    Decimal   @default(0.5) @db.Decimal(5, 3)
+  targetMarginPercent Decimal?  @db.Decimal(5, 2)
+  targetMarkupPercent Decimal?  @db.Decimal(7, 2)
+  alertDropPoints     Decimal   @default(5) @db.Decimal(5, 2)
+  // Cost per portion when the price was last reviewed; margin warnings compare against it.
+  baselineCost        Decimal?  @db.Decimal(12, 4)
+  baselineAt          DateTime?
+  version             Int       @default(1)
+  updatedById         String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([branchId])
+  @@map("menu_item_costings")
+}
+
+// An option's effect on stock and cost ("extra cheese" adds 30 g; "no onion" removes 20 g).
+model ModifierIngredient {
+  id           String          @id @default(cuid())
+  modifierId   String
+  modifier     Modifier        @relation(fields: [modifierId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient      @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  quantity     Decimal         @db.Decimal(12, 3) // signed; usable quantity per portion
+  unit         IngredientUnit?
+
+  @@unique([modifierId, ingredientId])
+  @@index([modifierId])
+  @@map("modifier_ingredients")
+}
+
+// A reusable in-house preparation (sauce, dough, spice mix). Its output is a PREPARED ingredient.
+model Preparation {
+  id                 String     @id @default(cuid())
+  branchId           String
+  branch             Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  outputIngredientId String     @unique
+  outputIngredient   Ingredient @relation(fields: [outputIngredientId], references: [id], onDelete: Cascade)
+
+  batchOutputQty Decimal  @db.Decimal(12, 3) // in the output ingredient's unit
+  overheads      Json     @default("[]")
+  version        Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  lines          PreparationLine[]
+  productionRuns ProductionRun[]
+
+  @@index([branchId])
+  @@map("preparations")
+}
+
+model PreparationLine {
+  id            String          @id @default(cuid())
+  preparationId String
+  preparation   Preparation     @relation(fields: [preparationId], references: [id], onDelete: Cascade)
+  ingredientId  String
+  ingredient    Ingredient      @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  quantity      Decimal         @db.Decimal(12, 3) // usable quantity per batch
+  unit          IngredientUnit?
+
+  @@unique([preparationId, ingredientId])
+  @@index([preparationId])
+  @@map("preparation_lines")
+}
+
+// One batch (or several) actually cooked. Consumes raw stock, receives finished stock at the
+// run's real cost. The (branchId, idempotencyKey) pair makes a retried/offline-synced run safe.
+model ProductionRun {
+  id            String      @id @default(cuid())
+  branchId      String
+  branch        Branch      @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  preparationId String
+  preparation   Preparation @relation(fields: [preparationId], references: [id], onDelete: Restrict)
+
+  idempotencyKey String
+  batches        Decimal  @db.Decimal(12, 3)
+  outputQty      Decimal  @db.Decimal(12, 3)
+  ingredientCost Decimal  @db.Decimal(12, 4)
+  overheadCost   Decimal  @db.Decimal(12, 4)
+  totalCost      Decimal  @db.Decimal(12, 4)
+  unitCost       Decimal  @db.Decimal(12, 4)
+  note           String?
+  createdById    String
+  createdAt      DateTime @default(now())
+
+  @@unique([branchId, idempotencyKey])
+  @@index([preparationId, createdAt])
+  @@map("production_runs")
 }
 
 model Supplier {
@@ -760,8 +961,9 @@ model Supplier {
   purchaseOrders PurchaseOrder[]
   goodsReceipts  GoodsReceipt[]
 
-  quotations SupplierQuotation[]
-  invoices   SupplierInvoice[]
+  quotations      SupplierQuotation[]
+  invoices        SupplierInvoice[]
+  purchaseReturns PurchaseReturn[]
 
   @@index([branchId])
   @@map("suppliers")
@@ -838,8 +1040,9 @@ model GoodsReceipt {
   receivedAt   DateTime @default(now())
   createdAt    DateTime @default(now())
 
-  items    GoodsReceiptItem[]
-  invoices SupplierInvoice[]
+  items           GoodsReceiptItem[]
+  invoices        SupplierInvoice[]
+  purchaseReturns PurchaseReturn[]
 
   @@unique([branchId, grnNumber])
   @@index([branchId])
@@ -862,7 +1065,8 @@ model GoodsReceiptItem {
   expiryDate  DateTime?
   createdAt   DateTime  @default(now())
 
-  stockBatch StockBatch?
+  stockBatch  StockBatch?
+  returnItems PurchaseReturnItem[]
 
   @@index([goodsReceiptId])
   @@map("goods_receipt_items")
@@ -984,13 +1188,15 @@ model SupplierInvoice {
   goodsReceiptId  String?
   goodsReceipt    GoodsReceipt?  @relation(fields: [goodsReceiptId], references: [id], onDelete: SetNull)
 
-  invoiceNumber String
-  invoiceDate   DateTime
-  dueDate       DateTime?
-  totalAmount   Decimal               @db.Decimal(12, 2)
-  amountPaid    Decimal               @default(0) @db.Decimal(12, 2)
-  status        SupplierInvoiceStatus @default(UNPAID)
-  notes         String?
+  invoiceNumber  String
+  invoiceDate    DateTime
+  dueDate        DateTime?
+  totalAmount    Decimal               @db.Decimal(12, 2)
+  amountPaid     Decimal               @default(0) @db.Decimal(12, 2)
+  // Credit from purchase returns applied against this invoice: it reduces what is still owed, like a payment does.
+  creditedAmount Decimal               @default(0) @db.Decimal(12, 2)
+  status         SupplierInvoiceStatus @default(UNPAID)
+  notes          String?
 
   recordedById String
   recordedBy   User     @relation("SupplierInvoiceRecordedBy", fields: [recordedById], references: [id])
@@ -1009,7 +1215,7 @@ model SupplierPayment {
   branchId          String
   branch            Branch          @relation(fields: [branchId], references: [id], onDelete: Cascade)
   supplierInvoiceId String
-  supplierInvoice   SupplierInvoice @relation(fields: [supplierInvoiceId], references: [id], onDelete: Cascade)
+  supplierInvoice   SupplierInvoice @relation(fields: [supplierInvoiceId], references: [id], onDelete: Restrict)
 
   amount        Decimal       @db.Decimal(12, 2)
   paymentMethod PaymentMethod
@@ -1024,6 +1230,56 @@ model SupplierPayment {
   @@map("supplier_payments")
 }
 
+// Goods sent back to a supplier. It takes the quantity out of stock (cheapest-first batches, like any other use),
+// and the value the supplier now owes us (quantity x the price we paid on that receipt) is credited against an
+// unpaid invoice. Whatever is left over stays as a credit on the supplier. Rows are never edited or deleted.
+model PurchaseReturn {
+  id       String @id @default(cuid())
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  supplierId     String
+  supplier       Supplier     @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  goodsReceiptId String
+  goodsReceipt   GoodsReceipt @relation(fields: [goodsReceiptId], references: [id], onDelete: Restrict)
+
+  returnNumber      String
+  reason            String
+  notes             String?
+  totalAmount       Decimal @db.Decimal(12, 2)
+  // The invoice this credit was applied to, how much of it, and what stays as an open credit on the supplier.
+  creditedInvoiceId String?
+  creditApplied     Decimal @default(0) @db.Decimal(12, 2)
+  creditOpen        Decimal @default(0) @db.Decimal(12, 2)
+
+  createdById     String
+  createdBy       User     @relation("PurchaseReturnBy", fields: [createdById], references: [id])
+  createdAt       DateTime @default(now())
+  clientRequestId String?  @unique
+
+  items PurchaseReturnItem[]
+
+  @@unique([branchId, returnNumber])
+  @@index([branchId, supplierId])
+  @@index([goodsReceiptId])
+  @@map("purchase_returns")
+}
+
+model PurchaseReturnItem {
+  id                 String           @id @default(cuid())
+  purchaseReturnId   String
+  purchaseReturn     PurchaseReturn   @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  goodsReceiptItemId String
+  goodsReceiptItem   GoodsReceiptItem @relation(fields: [goodsReceiptItemId], references: [id], onDelete: Restrict)
+  ingredientId       String
+  ingredient         Ingredient       @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  quantity           Decimal          @db.Decimal(12, 3)
+  unitCost           Decimal          @db.Decimal(12, 4)
+
+  @@index([goodsReceiptItemId])
+  @@map("purchase_return_items")
+}
+
 model StockBatch {
   id           String     @id @default(cuid())
   branchId     String
@@ -1035,6 +1291,9 @@ model StockBatch {
   goodsReceiptItem   GoodsReceiptItem? @relation(fields: [goodsReceiptItemId], references: [id], onDelete: SetNull)
 
   batchNumber       String
+  // Journal receipts carry a client key so a retried POST cannot double-count
+  // stock. Other batch sources leave this null (Postgres allows many NULLs).
+  idempotencyKey    String?
   quantityReceived  Decimal   @db.Decimal(12, 3)
   quantityRemaining Decimal   @db.Decimal(12, 3)
   unitCost          Decimal   @db.Decimal(12, 4)
@@ -1044,16 +1303,21 @@ model StockBatch {
   stockMovements StockMovement[]
   wasteLogs      WasteLog[]
 
+  @@unique([branchId, idempotencyKey])
   @@index([branchId, ingredientId, receivedAt])
   @@map("stock_batches")
 }
 
 enum StockMovementType {
+  OPENING // opening balance recorded when a stock item starts being tracked
+  PRODUCTION_USE // raw material actually used up by a production entry
+  PRODUCTION // finished output of a production run, received into stock
   RECEIPT
   WASTE
   ADJUSTMENT
   CONSUMPTION
   REVERSAL // compensating +qty when sold items are physically returned
+  PURCHASE_RETURN // goods sent back to a supplier
 }
 
 // How selling a menu item moves inventory.
@@ -1076,12 +1340,22 @@ model StockMovement {
   batchId      String?
   batch        StockBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
 
-  type     StockMovementType
-  quantity Decimal           @db.Decimal(12, 3) // signed: +in, -out
-  note     String?
+  type              StockMovementType
+  quantity          Decimal           @db.Decimal(12, 3) // signed: +in, -out
+  note              String?
   // Set for order-driven movements (checkout consumption / return reversal).
   // Plain column, no FK: the ledger must outlive a deleted order.
-  orderId  String?
+  orderId           String?
+  // Journal links. Plain columns, no FK, for the same reason as orderId: the ledger outlives its
+  // source record. deviceId is set for events that were created on a phone while offline.
+  productionEntryId String?
+  wasteEntryId      String?
+  deviceId          String?
+  // Place this quantity went into or came out of (production vouchers). Plain column, no FK. null = unassigned or
+  // unknown: every movement written before this column existed stays null; history is never guessed.
+  locationId        String?
+  // Stock journal entry (transfer / waste / correction) that wrote this line. Plain column, like the others.
+  journalEntryId    String?
 
   createdById String
   createdBy   User     @relation("StockMovementCreatedBy", fields: [createdById], references: [id])
@@ -1089,10 +1363,17 @@ model StockMovement {
 
   @@index([branchId, ingredientId, createdAt])
   @@index([orderId])
+  @@index([productionEntryId])
+  @@index([wasteEntryId])
+  @@index([journalEntryId])
+  @@index([branchId, createdAt])
   @@map("stock_movements")
 }
 
 enum WasteReason {
+  RETURNED_PLATE
+  PREP_TRIM
+  STORAGE_TEMPERATURE
   EXPIRED
   SPOILED
   DAMAGED
@@ -1114,6 +1395,9 @@ model WasteLog {
   reason          WasteReason
   unitCostAtWaste Decimal     @db.Decimal(12, 4)
   notes           String?
+  // Set for entries made through the waste journal (one entry can touch several batches).
+  entryId         String?
+  entry           WasteEntry? @relation(fields: [entryId], references: [id], onDelete: SetNull)
 
   createdById String
   createdBy   User     @relation("WasteLogCreatedBy", fields: [createdById], references: [id])
@@ -1153,6 +1437,7 @@ model MenuItem {
 
   availableFrom String? // "HH:mm" — availability window
   availableTo   String?
+  pausedUntil   DateTime? // Instant when a temporary sales pause ends, independent of the recurring window.
   isSeasonal    Boolean   @default(false)
   seasonStart   DateTime?
   seasonEnd     DateTime?
@@ -1178,6 +1463,7 @@ model MenuItem {
   comboComponents ComboComponent[]        @relation("ComboParent")
   usedInCombos    ComboComponent[]        @relation("ComboChild")
   recipeLines     RecipeIngredient[]
+  costing         MenuItemCosting?
 
   @@index([branchId, categoryId])
   @@map("menu_items")
@@ -1211,8 +1497,11 @@ model Modifier {
   kitchenNote     String?
   isDefault       Boolean  @default(false)
   sortOrder       Int      @default(0)
+  // false = taken off the menu but kept: past orders still point at it, so it cannot be deleted.
+  isActive        Boolean  @default(true)
 
   orderItemModifiers OrderItemModifier[]
+  ingredientLines    ModifierIngredient[]
 
   @@index([groupId])
   @@map("modifiers")
@@ -1233,6 +1522,11 @@ model MenuItemModifierGroup {
 // Customers (minimal Phase 1 shape — full CRM lands Phase 3)
 // ---------------------------------------------------------------------------
 
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+}
+
 model Customer {
   id       String @id @default(cuid())
   branchId String
@@ -1242,6 +1536,9 @@ model Customer {
   phone       String?
   email       String?
   address     String?
+  pincode     String?
+  // Label only: it does not block orders or change loyalty.
+  status      CustomerStatus @default(ACTIVE)
   birthday    DateTime?
   anniversary DateTime?
   allergies   String?
@@ -1413,6 +1710,11 @@ model Order {
   channel     OrderChannel     @default(STAFF)
   acceptance  AcceptanceStatus @default(NOT_REQUIRED)
 
+  // Table self-ordering: how the guest said they will pay, and whether the kitchen is waiting for that
+  // payment before it starts (online payments only; a cash order goes to the kitchen at once).
+  payIntent      PayIntent?
+  heldForPayment Boolean    @default(false)
+
   tableId    String?
   table      Table?  @relation(fields: [tableId], references: [id], onDelete: SetNull)
   guestCount Int?
@@ -1470,8 +1772,8 @@ model Order {
   // checkout; the zone's fee is snapshotted so later zone edits never
   // rewrite history.
   deliveryZoneId       String?
-  deliveryZone         DeliveryZone?   @relation(fields: [deliveryZoneId], references: [id], onDelete: SetNull)
-  deliveryFee          Decimal         @default(0) @db.Decimal(12, 2)
+  deliveryZone         DeliveryZone?        @relation(fields: [deliveryZoneId], references: [id], onDelete: SetNull)
+  deliveryFee          Decimal              @default(0) @db.Decimal(12, 2)
   deliveryAddress      String?
   deliveryPincode      String?
   deliveryPhone        String?
@@ -1481,7 +1783,8 @@ model Order {
   deliveryPlace        String?
   deliveryStatus       DeliveryStatus?
   driverId             String?
-  driver               User?           @relation("OrderDriver", fields: [driverId], references: [id], onDelete: SetNull)
+  driver               User?                @relation("OrderDriver", fields: [driverId], references: [id], onDelete: SetNull)
+  deliveryAssignments  DeliveryAssignment[]
   deliveryEtaAt        DateTime?
   assignedAt           DateTime?
   pickedUpAt           DateTime?
@@ -1538,12 +1841,31 @@ model OrderItem {
   kitchenNote String?
   status      KotItemStatus @default(NEW)
 
+  // Recipe costing. portionRatio: share of a full portion's stock this line uses (Half = the
+  // item's halfPortionRatio, else 1), frozen when the sale was paid. The production COST of the
+  // line lives in OrderItemCost, a separate table, because order rows are returned to waiters,
+  // kiosks and customers and a cost must never travel with them.
+  portion      String? // HALF | FULL | CUSTOM as ordered; null for plain items
+  portionRatio Decimal        @default(1) @db.Decimal(5, 3)
+  cost         OrderItemCost?
+
   modifiers    OrderItemModifier[]
   kotItems     KotItem[]
   stockReturns OrderItemStockReturn[]
 
   @@index([orderId])
   @@map("order_items")
+}
+
+// Production cost of ONE unit of an order line (incl. chosen options), frozen at payment so later
+// purchase-price changes never rewrite history. Read only by costing and reports.
+model OrderItemCost {
+  orderItemId String    @id
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  unitCost    Decimal   @db.Decimal(12, 4)
+  createdAt   DateTime  @default(now())
+
+  @@map("order_item_costs")
 }
 
 model OrderItemModifier {
@@ -1563,6 +1885,11 @@ model OrderItemModifier {
 // ---------------------------------------------------------------------------
 // Kitchen Order Tickets
 // ---------------------------------------------------------------------------
+
+enum PayIntent {
+  CASH // the guest will pay at the register
+  ONLINE // the guest chose to pay on their phone
+}
 
 enum KotStatus {
   NEW
@@ -1715,7 +2042,7 @@ model WaitlistEntry {
 model Payment {
   id      String @id @default(cuid())
   orderId String
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
   method          PaymentMethod
   amount          Decimal       @db.Decimal(12, 2) // applied to the bill (net of change)
@@ -1738,14 +2065,16 @@ model Payment {
 model Refund {
   id      String @id @default(cuid())
   orderId String
-  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
-  amount      Decimal       @db.Decimal(12, 2)
-  reason      String?
-  method      PaymentMethod // how the refund was issued back to the guest
-  createdById String
-  createdBy   User          @relation(fields: [createdById], references: [id])
-  createdAt   DateTime      @default(now())
+  amount          Decimal       @db.Decimal(12, 2)
+  reason          String?
+  method          PaymentMethod // how the refund was issued back to the guest
+  createdById     String
+  createdBy       User          @relation(fields: [createdById], references: [id])
+  createdAt       DateTime      @default(now())
+  // Set when the refund was made on a phone offline: its event id, so a re-send never refunds twice.
+  clientRequestId String?       @unique
 
   stockReturns OrderItemStockReturn[]
 
@@ -1798,10 +2127,17 @@ model Attendance {
   userId   String
   user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  clockInAt  DateTime  @default(now())
-  clockOutAt DateTime?
-  note       String?
+  clockInAt    DateTime  @default(now())
+  clockOutAt   DateTime?
+  note         String?
+  // Unpaid break taken inside this shift, taken off the paid hours.
+  breakMinutes Int       @default(0)
+  // Keys of the offline events that made this record, so a resent clock-in / clock-out changes nothing twice.
+  clockInKey   String?
+  clockOutKey  String?
 
+  @@unique([userId, clockInKey])
+  @@unique([userId, clockOutKey])
   @@index([branchId, clockInAt])
   @@index([userId, clockOutAt])
   @@map("attendance")
@@ -1912,10 +2248,18 @@ enum PayType {
 // One pay profile per staff member. MONTHLY rate is the full-month salary
 // (pro-rated by the days in the payroll period); HOURLY is per clocked hour.
 model StaffPay {
-  userId  String  @id
-  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  payType PayType @default(MONTHLY)
-  rate    Decimal @default(0) @db.Decimal(12, 2)
+  userId             String   @id
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  payType            PayType  @default(MONTHLY)
+  rate               Decimal  @default(0) @db.Decimal(12, 2)
+  // HOURLY staff: hours worked in one local day beyond this are overtime paid at rate x multiplier.
+  // null = no overtime rule (nothing is invented).
+  overtimeAfterHours Decimal? @db.Decimal(5, 2)
+  overtimeMultiplier Decimal  @default(1.5) @db.Decimal(4, 2)
+  // MONTHLY staff with a rota: clocking in later than this grace deducts the lateness pro rata of that shift's day,
+  // and a rostered day with no clock-in and no approved leave can cost a day's pay. null / false = off.
+  lateGraceMinutes   Int?
+  deductAbsence      Boolean  @default(false)
 
   @@map("staff_pay")
 }
@@ -1968,6 +2312,15 @@ model PayrollLine {
   otherDeductions      Decimal @default(0) @db.Decimal(12, 2)
   adjustmentNote       String?
   netPay               Decimal @db.Decimal(12, 2)
+  // Of hoursWorked, the part paid at the overtime multiplier, and its pay (already inside basePay).
+  overtimeHours        Decimal @default(0) @db.Decimal(8, 2)
+  overtimePay          Decimal @default(0) @db.Decimal(12, 2)
+  lateMinutes          Int     @default(0)
+  lateDeduction        Decimal @default(0) @db.Decimal(12, 2)
+  absentDays           Int     @default(0)
+  absenceDeduction     Decimal @default(0) @db.Decimal(12, 2)
+  // The inputs and formula lines this line was calculated from, frozen when the run was built.
+  calcInputs           Json?
 
   @@unique([runId, userId])
   @@map("payroll_lines")
@@ -1989,12 +2342,66 @@ model Expense {
   // Paid out of the till: counted against expected cash at day close.
   paidFromCash Boolean  @default(false)
 
-  createdById String
-  createdBy   User     @relation(fields: [createdById], references: [id])
-  createdAt   DateTime @default(now())
+  // Staff without expenses.approve submit PENDING expenses; only APPROVED ones count in cash closing, budgets,
+  // the ledger and bank matching. Existing rows are APPROVED, so nothing already recorded changes.
+  status       ExpenseStatus @default(APPROVED)
+  decidedById  String?
+  decidedAt    DateTime?
+  decisionNote String?
+
+  createdById     String
+  createdBy       User     @relation(fields: [createdById], references: [id])
+  createdAt       DateTime @default(now())
+  // Set when the expense was entered on a phone offline: its event id, so a re-send never adds it twice.
+  clientRequestId String?  @unique
+
+  pettyCashEntry PettyCashEntry?
 
   @@index([branchId, spentOn])
+  @@index([branchId, status])
   @@map("expenses")
+}
+
+enum ExpenseStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PettyCashKind {
+  TOPUP
+  VOUCHER
+  ADJUSTMENT
+}
+
+// The petty cash box of a branch is a running ledger: the balance is the sum of `delta`. A top-up adds, a voucher
+// (money paid out against a receipt) subtracts and creates its Expense, and a count that disagrees with the book
+// posts an ADJUSTMENT for the difference so the book matches the box again. Rows are never edited or deleted.
+model PettyCashEntry {
+  id          String        @id @default(cuid())
+  branchId    String
+  branch      Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  kind        PettyCashKind
+  // Signed amount: positive puts cash in the box, negative takes it out.
+  delta       Decimal       @db.Decimal(12, 2)
+  // ADJUSTMENT only: what was counted and what the book said at that moment.
+  countedCash Decimal?      @db.Decimal(12, 2)
+  bookBalance Decimal?      @db.Decimal(12, 2)
+  category    String?
+  payee       String?
+  receiptRef  String?
+  note        String?
+
+  expenseId String?  @unique
+  expense   Expense? @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+
+  createdById     String
+  createdBy       User     @relation("PettyCashEntryBy", fields: [createdById], references: [id])
+  createdAt       DateTime @default(now())
+  clientRequestId String?  @unique
+
+  @@index([branchId, createdAt])
+  @@map("petty_cash_entries")
 }
 
 // End-of-day cash count. expectedCash = opening float + cash payments taken
@@ -2455,6 +2862,44 @@ model SyncChange {
   @@map("sync_changes")
 }
 
+// Losing side of a concurrent edit (and flagged anomalies) kept for manager review. Resolved rows are immutable
+// (trigger in the 20261127010000 migration). Modelled here so `prisma migrate dev` sees no drift.
+model SyncConflict {
+  id         String    @id @default(dbgenerated("md5(((random())::text || (clock_timestamp())::text))"))
+  dedupeKey  String    @unique
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+  kind       String
+  tbl        String
+  pkKey      String
+  origin     String    @default("")
+  loser      Json?
+  loserOp    String?   @db.Char(1)
+  loserTs    DateTime? @db.Timestamptz(3)
+  winner     Json?
+  winnerTs   DateTime? @db.Timestamptz(3)
+  detail     Json?
+  status     String    @default("OPEN")
+  resolution String?
+  reason     String?
+  resolvedBy String?
+  resolvedAt DateTime? @db.Timestamptz(3)
+
+  @@index([status, createdAt])
+  @@map("sync_conflicts")
+}
+
+model SyncPeer {
+  deviceId      String    @id
+  firstSeenAt   DateTime  @default(now()) @db.Timestamptz(3)
+  lastSeenAt    DateTime  @default(now()) @db.Timestamptz(3)
+  lastPullAt    DateTime? @db.Timestamptz(3)
+  lastPushAt    DateTime? @db.Timestamptz(3)
+  lastPushCount Int       @default(0)
+  revokedAt     DateTime? @db.Timestamptz(3)
+
+  @@map("sync_peers")
+}
+
 // ---------------------------------------------------------------------------
 // Integrations hub: a restaurant's own connections to outside platforms
 // ---------------------------------------------------------------------------
@@ -2547,8 +2992,8 @@ model Referral {
 model PointsLedger {
   id             String   @id @default(cuid())
   branchId       String
-  customerId     String
-  customer       Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId     String?
+  customer       Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
   delta          Int
   reason         String // REFERRAL_REFERRER | REFERRAL_REFERRED | REDEEM | EARN
   referralId     String?
@@ -2719,4 +3164,758 @@ model GatewayRefund {
   @@index([gatewayPaymentId])
   @@index([orderId])
   @@map("gateway_refunds")
+}
+
+// ---------------------------------------------------------------------------
+// Stock journal: daily production (actual quantities, no recipe) and waste entries
+// ---------------------------------------------------------------------------
+
+enum ProductionStatus {
+  DRAFT
+  POSTED
+  VOIDED
+}
+
+enum ProductionLineRole {
+  INPUT // raw material actually used
+  OUTPUT // finished quantity actually produced
+}
+
+enum WasteKind {
+  INGREDIENT
+  FINISHED
+}
+
+enum WasteStatus {
+  POSTED
+  PENDING_APPROVAL
+  REJECTED
+  REVERSED
+}
+
+// One batch the kitchen made: what went in and what came out, as measured. Posting writes every
+// stock movement in one transaction; a posted entry is never edited, only voided (reversed) or
+// replaced through a correction that points back at it.
+model ProductionEntry {
+  id       String @id @default(cuid())
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  entryNo        String
+  status         ProductionStatus @default(DRAFT)
+  producedAt     DateTime
+  shift          String?
+  location       String?
+  batchRef       String?
+  notes          String?
+  responsibleId  String?
+  idempotencyKey String?
+  deviceId       String?
+
+  // Manufacturing costing, frozen when the batch is posted. null when the batch was recorded without costing.
+  costed             Boolean   @default(false)
+  ingredientCost     Decimal?  @db.Decimal(14, 4)
+  additionalCost     Decimal?  @db.Decimal(14, 4)
+  totalCost          Decimal?  @db.Decimal(14, 4)
+  unitCost           Decimal?  @db.Decimal(14, 4) // cost per finished unit of the primary output
+  manufacturedOn     DateTime?
+  expiryDate         DateTime?
+  // Menu selling price proposed from this batch (applied only at posting, by someone allowed to).
+  priceMenuItemId    String?
+  proposedPrice      Decimal?  @db.Decimal(12, 2)
+  expectedPrice      Decimal?  @db.Decimal(12, 2)
+  priceChangeId      String?
+  // The menu item this product is sold as and its selling price when the batch was posted (before any change made
+  // by the batch). Frozen history: later price edits never alter it.
+  menuItemId         String?
+  sellingPriceAtPost Decimal?  @db.Decimal(12, 2)
+  // Optional quality inspection. All null = "Not recorded"; it never implies the batch passed.
+  qualityResult      String? // PASS | FAIL | NEEDS_REVIEW
+  qualityGrade       String?
+  qualityNotes       String?
+  qualityById        String?
+  qualityAt          DateTime?
+
+  // Manufacturing journal v2. The recipe actually used is copied in (recipeSnapshot) so later recipe edits never
+  // rewrite this batch; the PO it came from is recorded as text, not a link, so the ledger outlives the PO.
+  recipeKind       String? // RECIPE | MENU
+  recipeId         String?
+  recipeName       String?
+  recipeSnapshot   Json?
+  sourcePoId       String?
+  sourcePoNumber   String?
+  sourceSupplier   String?
+  // QUANTITY | MANUAL when the voucher made more than one product; null for a single product.
+  allocationMethod String?
+
+  costs ProductionCost[]
+
+  correctsEntryId String?
+  correctsEntry   ProductionEntry?  @relation("ProductionCorrection", fields: [correctsEntryId], references: [id], onDelete: SetNull)
+  correctedBy     ProductionEntry[] @relation("ProductionCorrection")
+
+  createdById String
+  createdAt   DateTime  @default(now())
+  postedById  String?
+  postedAt    DateTime?
+  voidedById  String?
+  voidedAt    DateTime?
+  voidReason  String?
+
+  lines ProductionLine[]
+
+  @@unique([branchId, entryNo])
+  @@unique([branchId, idempotencyKey])
+  @@index([branchId, producedAt])
+  @@map("production_entries")
+}
+
+model ProductionLine {
+  id           String             @id @default(cuid())
+  entryId      String
+  entry        ProductionEntry    @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  role         ProductionLineRole
+  ingredientId String
+  ingredient   Ingredient         @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+
+  // As typed by the cook (e.g. 6 KG) and the same amount in the item's own stock unit.
+  enteredQuantity Decimal        @db.Decimal(12, 3)
+  enteredUnit     IngredientUnit
+  quantity        Decimal        @db.Decimal(12, 3)
+  // Costing: the rate per STOCK unit used for this batch and the resulting line cost (frozen at posting).
+  unitRate        Decimal?       @db.Decimal(14, 4)
+  lineCost        Decimal?       @db.Decimal(16, 4)
+
+  // Manufacturing journal v2 (all optional, so every earlier row stays valid and means exactly what it did).
+  // OUTPUT: `quantity` is the GOOD (saleable) quantity that is added to stock; rejected pieces are only recorded.
+  rejectedQuantity     Decimal  @default(0) @db.Decimal(12, 3)
+  // Row-level place. locationId is a plain column (no FK) so history survives a place being renamed or retired;
+  // locationName is the name at posting. null = the item's "unassigned" stock, exactly as before.
+  locationId           String?
+  locationName         String?
+  lotNumber            String?
+  // INPUT: what the recipe expected for this batch (stock unit), frozen with the voucher.
+  expectedQuantity     Decimal? @db.Decimal(12, 3)
+  // INPUT: tie this material wholly to one finished product (direct material); null = shared cost.
+  directToIngredientId String?
+  // OUTPUT: split of shared cost and the result, frozen at posting.
+  allocationPercent    Decimal? @db.Decimal(7, 3)
+  allocatedCost        Decimal? @db.Decimal(16, 4)
+  goodUnitCost         Decimal? @db.Decimal(14, 4)
+
+  @@index([entryId])
+  @@index([ingredientId])
+  @@map("production_lines")
+}
+
+// One waste event. includedInProduction = the quantity is already part of a production entry's
+// shortfall (for example batter spilled while making idli), so it is recorded for reporting but
+// does NOT move stock a second time.
+model WasteEntry {
+  id       String @id @default(cuid())
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  kind         WasteKind
+  ingredientId String
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+
+  enteredQuantity Decimal        @db.Decimal(12, 3)
+  enteredUnit     IngredientUnit
+  quantity        Decimal        @db.Decimal(12, 3)
+
+  reason               WasteReason
+  shift                String?
+  location             String?
+  note                 String?
+  occurredAt           DateTime
+  includedInProduction Boolean     @default(false)
+  productionEntryId    String?
+  // Optional photo of what was thrown away (never required, never blocks an offline entry).
+  photoUrl             String?
+
+  status         WasteStatus @default(POSTED)
+  idempotencyKey String?
+  deviceId       String?
+
+  createdById   String
+  createdAt     DateTime  @default(now())
+  approvedById  String?
+  approvedAt    DateTime?
+  decisionNote  String?
+  reversedById  String?
+  reversedAt    DateTime?
+  reverseReason String?
+
+  logs WasteLog[]
+
+  @@unique([branchId, idempotencyKey])
+  @@index([branchId, occurredAt])
+  @@index([ingredientId])
+  @@map("waste_entries")
+}
+
+// A saved arrangement of one floor (lunch, dinner, event). Tables are the same physical tables in every
+// layout; a layout remembers which are in use and where they sit. Activating one applies it.
+model FloorLayout {
+  id        String   @id @default(cuid())
+  floorId   String
+  floor     Floor    @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  name      String
+  isActive  Boolean  @default(false)
+  sortOrder Int      @default(0)
+  // [{tableId,posX,posY,width,height,rotation}] for the tables that are in this layout
+  tables    Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([floorId, name])
+  @@map("floor_layouts")
+}
+
+// A phone enrolled to take orders. The phone sends its deviceId on every request; revoking the row makes
+// the server refuse that phone even though its user's session is still valid.
+model PosDevice {
+  id           String    @id @default(cuid())
+  restaurantId String
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId     String
+  name         String
+  platform     String?
+  appVersion   String?
+  enrolledAt   DateTime  @default(now())
+  lastSeenAt   DateTime  @default(now())
+  lastSyncAt   DateTime?
+  pendingCount Int       @default(0)
+  failedCount  Int       @default(0)
+  lastError    String?
+  revokedAt    DateTime?
+  revokedById  String?
+
+  @@unique([restaurantId, deviceId])
+  @@index([userId])
+  @@index([deviceId])
+  @@map("pos_devices")
+}
+
+// A phone's own cash drawer counted at the end of its day (standalone POS). Separate from CashClosing, which is
+// the whole branch: a phone only knows the cash it took itself. One per phone per day; a later count replaces it.
+model PhoneTillClosing {
+  id           String   @id @default(cuid())
+  branchId     String
+  branch       Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  deviceId     String
+  deviceName   String
+  businessDate DateTime @db.Date
+  openingFloat Decimal  @default(0) @db.Decimal(12, 2)
+  cashSales    Decimal  @db.Decimal(12, 2)
+  cashRefunds  Decimal  @default(0) @db.Decimal(12, 2)
+  cashExpenses Decimal  @default(0) @db.Decimal(12, 2)
+  expectedCash Decimal  @db.Decimal(12, 2)
+  countedCash  Decimal  @db.Decimal(12, 2)
+  variance     Decimal  @db.Decimal(12, 2)
+  netSales     Decimal  @default(0) @db.Decimal(12, 2)
+  closedByName String?
+  closedAt     DateTime
+  syncedById   String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([branchId, deviceId, businessDate])
+  @@index([branchId, businessDate])
+  @@map("phone_till_closings")
+}
+
+// One physical count of the shelves (daily close, weekly, month end). The lines show what the system
+// expected and what was counted; each difference is booked as an ADJUSTMENT linked back here.
+model StockTake {
+  id             String   @id @default(cuid())
+  branchId       String
+  branch         Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  takenAt        DateTime
+  area           String?
+  note           String?
+  idempotencyKey String?
+  deviceId       String?
+  createdById    String
+  createdAt      DateTime @default(now())
+  lines          Json // [{ingredientId,name,unit,expected,counted,difference}]
+
+  @@unique([branchId, idempotencyKey])
+  @@index([branchId, takenAt])
+  @@map("stock_takes")
+}
+
+// A place stock is kept (dry store, walk-in fridge, freezer, bar). The item's total stays on
+// Ingredient.currentStock; a StockLevel says how much of it is in this place. Total minus the levels is
+// "unassigned" until someone counts or moves it.
+model StockLocation {
+  id        String       @id @default(cuid())
+  branchId  String
+  branch    Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  name      String
+  sortOrder Int          @default(0)
+  isActive  Boolean      @default(true)
+  levels    StockLevel[]
+  createdAt DateTime     @default(now())
+
+  @@unique([branchId, name])
+  @@map("stock_locations")
+}
+
+model StockLevel {
+  id           String        @id @default(cuid())
+  ingredientId String
+  ingredient   Ingredient    @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  locationId   String
+  location     StockLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  quantity     Decimal       @default(0) @db.Decimal(12, 3)
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([ingredientId, locationId])
+  @@index([locationId])
+  @@map("stock_levels")
+}
+
+// Moving stock between places in one branch. fromLocationId null = taken from the unassigned part.
+model LocationTransfer {
+  id             String   @id @default(cuid())
+  branchId       String
+  ingredientId   String
+  fromLocationId String?
+  toLocationId   String
+  quantity       Decimal  @db.Decimal(12, 3)
+  note           String?
+  idempotencyKey String?
+  createdById    String
+  createdAt      DateTime @default(now())
+
+  @@unique([branchId, idempotencyKey])
+  @@index([branchId, createdAt])
+  @@map("location_transfers")
+}
+
+// A guest's tap/scan can be retried by the phone; the same key never makes a second order or adds a round twice.
+model PublicOrderKey {
+  id        String   @id @default(cuid())
+  branchId  String
+  key       String
+  orderId   String
+  createdAt DateTime @default(now())
+
+  @@unique([branchId, key])
+  @@map("public_order_keys")
+}
+
+// ---------------------------------------------------------------------------
+// Paging buzzers (one per table)
+// ---------------------------------------------------------------------------
+
+enum BuzzerDriver {
+  SIMULATED // a device (or the simulator page) that polls the server with its token
+  WEBHOOK // the server POSTs a signed call to the base station / gateway at webhookUrl
+}
+
+enum BuzzerCallState {
+  PENDING // waiting for the device to collect it
+  SENT // delivered (webhook accepted it, or the device fetched it)
+  ACKED // the guest or staff acknowledged it
+  EXPIRED
+  FAILED
+}
+
+model Buzzer {
+  id       String @id @default(cuid())
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  name          String
+  // The number printed on the buzzer, if any.
+  number        String?
+  tableId       String?      @unique
+  driver        BuzzerDriver @default(SIMULATED)
+  webhookUrl    String?
+  webhookSecret String?
+  deviceToken   String       @unique
+  isActive      Boolean      @default(true)
+  lastSeenAt    DateTime?
+  createdAt     DateTime     @default(now())
+
+  calls BuzzerCall[]
+
+  @@unique([branchId, name])
+  @@map("buzzers")
+}
+
+model BuzzerCall {
+  id          String          @id @default(cuid())
+  buzzerId    String
+  buzzer      Buzzer          @relation(fields: [buzzerId], references: [id], onDelete: Cascade)
+  orderId     String?
+  tableId     String?
+  state       BuzzerCallState @default(PENDING)
+  error       String?
+  createdById String?
+  createdAt   DateTime        @default(now())
+  sentAt      DateTime?
+  ackedAt     DateTime?
+  expiresAt   DateTime
+
+  @@index([buzzerId, state])
+  @@index([orderId])
+  @@map("buzzer_calls")
+}
+
+// ---------------------------------------------------------------------------
+// Customer-facing screens: one terminal per display, with its own adverts
+// ---------------------------------------------------------------------------
+
+enum AdKind {
+  IMAGE
+  VIDEO
+}
+
+model DisplayTerminal {
+  id       String @id @default(cuid())
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  name            String
+  token           String    @unique // in the display's URL; read-only access to what is shown
+  idleSeconds     Int       @default(45) // a half-finished order with no change this long returns to adverts
+  thankYouSeconds Int       @default(8)
+  adSlideSeconds  Int       @default(10)
+  adFit           String    @default("contain") // contain | cover
+  isActive        Boolean   @default(true)
+  state           Json?
+  stateAt         DateTime?
+  lastSeenAt      DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@unique([branchId, name])
+  @@map("display_terminals")
+}
+
+model DisplayAd {
+  id          String    @id @default(cuid())
+  branchId    String
+  branch      Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  terminalId  String? // null = every terminal of the branch
+  kind        AdKind
+  url         String
+  title       String?
+  durationSec Int? // images only; null = the terminal's default
+  sortOrder   Int       @default(0)
+  isActive    Boolean   @default(true)
+  startsOn    DateTime?
+  endsOn      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([branchId, isActive])
+  @@map("display_ads")
+}
+
+// A non-ingredient cost of one production batch (labour, packaging, fuel...). included = counted in the finished
+// product's cost; an excluded line is only recorded.
+model ProductionCost {
+  id          String          @id @default(cuid())
+  entryId     String
+  entry       ProductionEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  category    String
+  description String?
+  amount      Decimal         @db.Decimal(14, 2)
+  included    Boolean         @default(true)
+
+  @@index([entryId])
+  @@map("production_costs")
+}
+
+// Every change of a menu selling price made from the Stock Journal (other changes stay in the audit log).
+model MenuPriceChange {
+  id                String   @id @default(cuid())
+  branchId          String
+  menuItemId        String
+  oldPrice          Decimal  @db.Decimal(12, 2)
+  newPrice          Decimal  @db.Decimal(12, 2)
+  changedById       String
+  changedAt         DateTime @default(now())
+  source            String   @default("STOCK_JOURNAL")
+  productionEntryId String?
+  unitCostAtChange  Decimal? @db.Decimal(14, 4)
+
+  @@index([branchId, changedAt])
+  @@index([menuItemId, changedAt])
+  @@map("menu_price_changes")
+}
+
+// ---------------------------------------------------------------------------
+// Live table sessions: the printed QR locates the table, the session code proves someone is there
+// ---------------------------------------------------------------------------
+
+enum TableSessionStatus {
+  ACTIVE
+  CLOSED
+}
+
+model TableSession {
+  id           String             @id @default(cuid())
+  branchId     String
+  tableId      String
+  status       TableSessionStatus @default(ACTIVE)
+  // sha256 of the short code (the code itself is shown to staff once and never stored)
+  codeHash     String
+  openedById   String? // null when the first valid guest order opened it (automatic sessions)
+  openedVia    String             @default("STAFF") // STAFF | NFC | GUEST_ORDER
+  openedAt     DateTime           @default(now())
+  expiresAt    DateTime
+  closedAt     DateTime?
+  closedReason String?
+  failedTries  Int                @default(0)
+  lockedUntil  DateTime?
+  // Per-session secret behind the rotating join QR (HMAC key). Never returned; null on sessions opened before it existed.
+  joinSecret   String?
+
+  grants TableSessionGrant[]
+
+  @@index([tableId, status])
+  @@map("table_sessions")
+}
+
+// What a guest's phone holds after entering the code: a random bearer, stored only as a hash, bound to one session.
+model TableSessionGrant {
+  id        String       @id @default(cuid())
+  sessionId String
+  session   TableSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tokenHash String       @unique
+  createdAt DateTime     @default(now())
+
+  @@index([sessionId])
+  @@map("table_session_grants")
+}
+
+// ---------------------------------------------------------------------------
+// Customer ratings (one per completed order)
+// ---------------------------------------------------------------------------
+
+model OrderRating {
+  id        String   @id @default(cuid())
+  branchId  String
+  orderId   String   @unique
+  stars     Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@index([branchId, createdAt])
+  @@map("order_ratings")
+}
+
+// ---------------------------------------------------------------------------
+// Secure NFC table tags (NXP NTAG 424 DNA with Secure Unique NFC messages)
+// ---------------------------------------------------------------------------
+
+enum NfcTagStatus {
+  PROVISIONING // keys generated, tag not yet written and proven by a first verified tap
+  ACTIVE
+  DISABLED
+}
+
+enum NfcTagMode {
+  SECURE // NTAG 424 DNA, every tap carries an encrypted UID/counter and a MAC
+  BASIC // an ordinary NFC card holding the table's static QR link: no cryptography, same trust as the printed QR
+}
+
+model NfcTag {
+  id             String       @id @default(cuid())
+  // Random, public, printed in the tag's URL: tells the server which tag's keys to use. Not a secret.
+  publicRef      String       @unique
+  branchId       String
+  branch         Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  tableId        String
+  table          Table        @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  label          String?
+  mode           NfcTagMode   @default(SECURE)
+  status         NfcTagStatus @default(PROVISIONING)
+  // Hex UID of the physical tag, bound by the first verified tap. A different chip can never answer for this tag.
+  uid            String?
+  keyVersion     Int          @default(1)
+  // AES-128 keys (hex) sealed with the server secret box; never returned after provisioning.
+  metaKeySealed  String? // decrypts the mirrored UID + counter (SDMMetaRead key)
+  fileKeySealed  String? // verifies the MAC (SDMFileRead key)
+  // Highest SDM read counter accepted. A tap must be strictly higher: a copied or replayed URL carries an old one.
+  lastCounter    Int          @default(-1)
+  lastAuthAt     DateTime?
+  disabledAt     DateTime?
+  disabledReason String?
+  replacesId     String? // the tag record this one replaced
+  createdById    String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  taps NfcTap[]
+
+  @@unique([branchId, uid])
+  @@index([tableId])
+  @@map("nfc_tags")
+}
+
+model NfcTap {
+  id        String   @id @default(cuid())
+  tagId     String
+  tag       NfcTag   @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  branchId  String
+  counter   Int?
+  // OK | BAD_FORMAT | BAD_MAC | UID_MISMATCH | REPLAY | DISABLED | NOT_ACTIVE | TEST_OK
+  result    String
+  createdAt DateTime @default(now())
+
+  @@index([tagId, createdAt])
+  @@index([branchId, createdAt])
+  @@map("nfc_taps")
+}
+
+// What a phone holds after a verified tap (or a code/QR entry): a short-lived, random bearer stored only as a hash.
+// It proves "this phone recently tapped THIS table's tag". It does not open the table; the first valid order does.
+model TableAccess {
+  id         String    @id @default(cuid())
+  tableId    String
+  table      Table     @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  tagId      String?
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([tableId, expiresAt])
+  @@map("table_accesses")
+}
+
+// A saved bill of materials: what a base output quantity of a finished product takes. Editing it bumps `version`;
+// a posted voucher keeps its own snapshot, so history never changes. Legacy menu-item recipes still work (as "MENU").
+model ProductRecipe {
+  id                 String     @id @default(cuid())
+  branchId           String
+  branch             Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  outputIngredientId String
+  outputIngredient   Ingredient @relation(fields: [outputIngredientId], references: [id], onDelete: Cascade)
+  name               String
+  baseOutputQty      Decimal    @db.Decimal(12, 3) // good output this recipe makes, in the output item's stock unit
+  version            Int        @default(1)
+  isActive           Boolean    @default(true)
+  notes              String?
+  createdById        String?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  lines ProductRecipeLine[]
+
+  @@unique([branchId, outputIngredientId, name])
+  @@index([branchId, outputIngredientId])
+  @@map("product_recipes")
+}
+
+model ProductRecipeLine {
+  id           String         @id @default(cuid())
+  recipeId     String
+  recipe       ProductRecipe  @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient     @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  quantity     Decimal        @db.Decimal(12, 3) // for baseOutputQty, in `unit`
+  unit         IngredientUnit
+
+  @@unique([recipeId, ingredientId])
+  @@map("product_recipe_lines")
+}
+
+/// Append-only history of who a delivery order was given to. The order row holds the current rider
+/// (driverId); every assign, reassign and release adds one row here, never edits one.
+model DeliveryAssignment {
+  id           String   @id @default(cuid())
+  orderId      String
+  order        Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  branchId     String
+  fromDriverId String?
+  toDriverId   String?
+  reason       String?
+  assignedById String
+  assignedBy   User     @relation("DeliveryAssignmentBy", fields: [assignedById], references: [id], onDelete: Restrict)
+  createdAt    DateTime @default(now())
+
+  @@index([orderId, createdAt])
+  @@index([branchId, createdAt])
+  @@map("delivery_assignments")
+}
+
+// ---- Stock journal entries (transfer, waste/spoilage, correction) ----------------------------------------
+// Production keeps its own voucher (ProductionEntry). These three kinds share one entry/line shape and post into the
+// same ledger as everything else: StockMovement (corrections, waste), WasteEntry (waste, so the Waste reports see it)
+// and StockLevel/LocationTransfer (transfers between places). A draft changes nothing; posting is one transaction;
+// a posted entry is never edited, only reversed.
+enum StockJournalType {
+  TRANSFER // move stock between places; the item's total does not change
+  WASTE // spoiled, expired, dropped: stock leaves and a waste record is written
+  CORRECTION // the count was wrong: stock goes up or down, reason required
+}
+
+model StockJournalEntry {
+  id       String @id @default(cuid())
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  entryNo        String // SJ-YYYYMMDD-nnn, restaurant's local date
+  type           StockJournalType
+  status         ProductionStatus @default(DRAFT)
+  occurredAt     DateTime
+  reason         String?
+  notes          String?
+  idempotencyKey String?
+
+  createdById String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  postedById  String?
+  postedAt    DateTime?
+  voidedById  String?
+  voidedAt    DateTime?
+  voidReason  String?
+
+  lines StockJournalLine[]
+
+  @@unique([branchId, entryNo])
+  @@unique([branchId, idempotencyKey])
+  @@index([branchId, occurredAt])
+  @@map("stock_journal_entries")
+}
+
+model StockJournalLine {
+  id           String            @id @default(cuid())
+  entryId      String
+  entry        StockJournalEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  ingredientId String
+  ingredient   Ingredient        @relation(fields: [ingredientId], references: [id], onDelete: Restrict)
+  sortOrder    Int               @default(0)
+
+  // OUT = leaves stock (or leaves the "from" place for a transfer); IN = enters stock (corrections only).
+  direction       String
+  enteredQuantity Decimal        @db.Decimal(12, 3)
+  enteredUnit     IngredientUnit
+  quantity        Decimal        @db.Decimal(12, 3) // in the item's stock unit
+
+  // Places are plain columns plus the name at the time, so history survives a rename. null from = unassigned stock.
+  fromLocationId   String?
+  fromLocationName String?
+  toLocationId     String?
+  toLocationName   String?
+
+  wasteReason  WasteReason?
+  note         String?
+  // The item's weighted-average cost per stock unit when posted (the app's cost basis); display only, never posted
+  // to any account. null on drafts and for items with no cost yet.
+  unitCost     Decimal?     @db.Decimal(14, 4)
+  // WASTE: the waste record this line created when posted.
+  wasteEntryId String?
+
+  @@index([entryId])
+  @@index([ingredientId])
+  @@map("stock_journal_lines")
 }

@@ -1,4 +1,17 @@
+import type { ReportedPause } from "./menu-pauses";
+
 const API_BASE = "/api/v1";
+
+// Calls made by signed-out pages. A 401 there is expected (login form, public
+// menu/kiosk), so it must never bounce the user to /login.
+const PUBLIC_PREFIXES = ["/auth/", "/public/", "/display/", "/setup"];
+const isPublicCall = (path: string) => PUBLIC_PREFIXES.some((p) => path.startsWith(p));
+
+let onUnauthorized: (() => void) | null = null;
+/** Lets the app shell override the fallback (e.g. React Query cache cleanup). */
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  onUnauthorized = fn;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -6,6 +19,7 @@ export class ApiError extends Error {
     public status: number,
     public issues?: unknown,
     public code?: string,
+    public pausedItems: ReportedPause[] = [],
   ) {
     super(message);
   }
@@ -27,7 +41,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ message: res.statusText }));
-    throw new ApiError(body.message ?? "Request failed", res.status, body.issues, body.code);
+    if (res.status === 401 && !isPublicCall(path) && typeof window !== "undefined") {
+      // The JWT can expire mid-shift. Without this, every query fails 401 but
+      // the shell keeps rendering the last cached user and the operator is
+      // stuck in error states until they manually navigate to sign-in.
+      if (onUnauthorized) onUnauthorized();
+      else window.location.replace("/login");
+    }
+    throw new ApiError(body.message ?? "Request failed", res.status, body.issues, body.code, body.pausedItems);
   }
 
   if (res.status === 204) return undefined as T;
@@ -35,11 +56,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body?: unknown) =>
-    request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
-  patch: <T>(path: string, body?: unknown) =>
-    request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
+  get: <T>(path: string, init?: RequestInit) => request<T>(path, init),
+  post: <T>(path: string, body?: unknown, init?: RequestInit) =>
+    request<T>(path, { ...init, method: "POST", body: body ? JSON.stringify(body) : undefined }),
+  patch: <T>(path: string, body?: unknown, init?: RequestInit) =>
+    request<T>(path, { ...init, method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
   put: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "PUT", body: body ? JSON.stringify(body) : undefined }),
   delete: <T>(path: string, body?: unknown) =>

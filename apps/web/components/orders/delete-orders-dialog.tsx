@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { ShieldAlert } from "lucide-react";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
@@ -31,6 +32,7 @@ export function DeleteOrdersDialog({
   onOpenChange: (open: boolean) => void;
   onDeleted: () => void;
 }) {
+  const { t } = useI18n();
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const del = useDeleteOrders(branchId);
@@ -51,13 +53,13 @@ export function DeleteOrdersDialog({
       { orderIds, password },
       {
         onSuccess: (res) => {
-          toast.success(`Deleted ${res.deleted} transaction${res.deleted === 1 ? "" : "s"}`);
+          toast.success((res.deleted === 1 ? t("Deleted {deleted} transaction", { deleted: res.deleted }) : t("Deleted {deleted} transactions", { deleted: res.deleted })));
           close(false);
           onDeleted();
         },
         onError: (err) => {
           setPassword("");
-          setError(err instanceof ApiError ? err.message : "Could not delete transactions");
+          setError(err instanceof ApiError ? err.message : t("Could not delete transactions"));
         },
       },
     );
@@ -69,16 +71,13 @@ export function DeleteOrdersDialog({
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <ShieldAlert className="h-5 w-5 text-destructive" aria-hidden />
-              Delete {count} transaction{count === 1 ? "" : "s"}?
-            </DialogTitle>
+              <ShieldAlert className="h-5 w-5 text-destructive" aria-hidden />{(count === 1 ? t("Delete {count} transaction?", { count }) : t("Delete {count} transactions?", { count }))}</DialogTitle>
             <DialogDescription>
-              They are removed from sales history, reports and the dashboard for good. A record of
-              each stays in the Audit Log. Enter your admin password to confirm.
+              {t("You can permanently delete finished bills that have no payment history, refund history or VERI*FACTU invoice. Every selected bill must qualify. The Audit Log records each deletion. Enter your admin password to confirm.")}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="delete-orders-password">Admin password</Label>
+            <Label htmlFor="delete-orders-password">{t("Admin password")}</Label>
             <PasswordInput
               id="delete-orders-password"
               
@@ -100,10 +99,10 @@ export function DeleteOrdersDialog({
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => close(false)}>
-              Keep them
+              {t("Keep them")}
             </Button>
             <Button type="submit" variant="destructive" disabled={del.isPending || !password}>
-              {del.isPending ? "Deleting…" : `Delete ${count}`}
+              {del.isPending ? t("Deleting…") : t("Delete {count}", { count })}
             </Button>
           </DialogFooter>
         </form>

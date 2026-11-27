@@ -13,13 +13,42 @@ export const ingredientUnitSchema = z.enum([
 ]);
 export type IngredientUnit = z.infer<typeof ingredientUnitSchema>;
 
-export const ingredientSchema = z.object({
-  name: z.string().min(1),
-  sku: z.string().optional(),
+// "1 stock unit = `per` of `unit`", e.g. a PACK item stocked as 25 kg: {unit:"G", per:25000}.
+export const unitConversionSchema = z.object({
   unit: ingredientUnitSchema,
-  reorderLevel: z.coerce.number().nonnegative().default(0),
-  isActive: z.boolean().default(true),
+  per: z.coerce.number().positive().max(1e9),
 });
+
+export const ingredientSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    sku: z.string().trim().optional(),
+    unit: ingredientUnitSchema,
+    reorderLevel: z.coerce.number().nonnegative().default(0),
+    isActive: z.boolean().default(true),
+    // PURCHASED = raw material, PREPARED = finished product made in the kitchen.
+    kind: z.enum(["PURCHASED", "PREPARED"]).default("PURCHASED"),
+    category: z.string().trim().max(60).nullable().optional(),
+    storageLocation: z.string().trim().max(80).nullable().optional(),
+    purchaseUnit: ingredientUnitSchema.nullable().optional(),
+    conversions: z.array(unitConversionSchema).max(8).default([]),
+    // A waste entry larger than this (in the stock unit) waits for a manager. null = never.
+    wasteApprovalQty: z.coerce.number().positive().nullable().optional(),
+    // Stock to order back up to; blank = twice the minimum.
+    parLevel: z.coerce.number().positive().nullable().optional(),
+  })
+  .superRefine((v, ctx) => {
+    const seen = new Set<string>();
+    for (const [i, c] of v.conversions.entries()) {
+      if (c.unit === v.unit) {
+        ctx.addIssue({ code: "custom", path: ["conversions", i, "unit"], message: "Same as the stock unit" });
+      }
+      if (seen.has(c.unit)) {
+        ctx.addIssue({ code: "custom", path: ["conversions", i, "unit"], message: "Duplicate conversion" });
+      }
+      seen.add(c.unit);
+    }
+  });
 export type IngredientDto = z.infer<typeof ingredientSchema>;
 
 export const stockAdjustmentSchema = z.object({
@@ -110,11 +139,14 @@ export const goodsReceiptSchema = z.object({
 export type GoodsReceiptDto = z.infer<typeof goodsReceiptSchema>;
 
 export const wasteReasonSchema = z.enum([
-  "EXPIRED",
   "SPOILED",
-  "DAMAGED",
-  "PREP_ERROR",
+  "EXPIRED",
   "OVER_PRODUCTION",
+  "DAMAGED",
+  "RETURNED_PLATE",
+  "PREP_TRIM",
+  "STORAGE_TEMPERATURE",
+  "PREP_ERROR",
   "OTHER",
 ]);
 export type WasteReason = z.infer<typeof wasteReasonSchema>;
@@ -202,3 +234,26 @@ export const supplierPaymentSchema = z.object({
   reference: z.string().optional(),
 });
 export type SupplierPaymentDto = z.infer<typeof supplierPaymentSchema>;
+
+const threeDecimals = (n: number) => Math.abs(n * 1000 - Math.round(n * 1000)) < 1e-6;
+
+// Goods sent back to a supplier against one goods receipt.
+export const purchaseReturnSchema = z.object({
+  goodsReceiptId: z.string().min(1),
+  reason: z.string().trim().min(1).max(200),
+  notes: z.string().trim().max(500).optional(),
+  items: z
+    .array(
+      z.object({
+        goodsReceiptItemId: z.string().min(1),
+        quantity: z.coerce.number().positive().max(1_000_000).refine(threeDecimals, "At most 3 decimals"),
+      }),
+    )
+    .min(1)
+    .max(100),
+  // Which unpaid invoice the credit goes against. Defaults to the invoice recorded for that receipt.
+  invoiceId: z.string().min(1).optional(),
+  // One per attempt: a retry or double click returns the first return instead of taking stock out twice.
+  clientRequestId: z.string().min(8).max(64).optional(),
+});
+export type PurchaseReturnDto = z.infer<typeof purchaseReturnSchema>;

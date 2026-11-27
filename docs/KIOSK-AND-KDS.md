@@ -34,8 +34,9 @@ station chips, (b) realtime now always connects through the web origin (see §6)
    full-screen, landscape, in Spanish.
 3. Use the **HTTPS** address. Service worker, install, and screen wake lock only exist in a
    secure context; over plain `http://192.168.x.x` the kiosk still works but without those.
-4. Languages: Spanish by default after every customer; EN toggle in the header. The choice never
-   persists and never touches the staff UI's saved language.
+4. Each customer starts in Spanish. Tap the welcome screen, then select **EN** for English or **PT** for
+   Brazilian Portuguese in the header. The choice applies only to the current kiosk session.
+   [View the order review screen in Brazilian Portuguese](./assets/kiosk-pt-br.png).
 
 ### Keeping the kiosk locked down and awake (separate from this code)
 This app deliberately does **not** try to bypass Android's security. To stop customers leaving
@@ -122,8 +123,8 @@ pnpm install && pnpm --filter @nodedr-restaurant/types build
 (cd apps/backend && npx tsc --noEmit && npx jest)                        # unit incl. kiosk service
 (cd apps/web && npx tsc --noEmit && npx eslint . && npm test)            # node:test: basket, flow reducer, scan, ticket
 # API integration against a real, migrated + seeded Postgres:
-cd apps/backend && npx prisma migrate deploy && npx ts-node prisma/seed.ts
-KIOSK_E2E=1 npx jest --config ./test/jest-e2e.json kiosk --forceExit
+(cd apps/backend && pnpm exec prisma migrate deploy && pnpm exec prisma db seed)
+(cd apps/backend && KIOSK_E2E=1 pnpm exec jest --config ./test/jest-e2e.json --runInBand kiosk)
 # Browser flow (Playwright, Python): kiosk 1920x1080 + 1280x720, tablet/portrait/phone widths, KDS handoff, scanner fallback
 KIOSK_URL=https://<host>/kiosk/<token> SHOTS=./shots python3 apps/web/e2e/kiosk_flow.py
 ```

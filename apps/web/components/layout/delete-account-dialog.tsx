@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
@@ -13,6 +14,7 @@ import { clearOfflineCache } from "@/lib/offline-cache";
 
 /** Delete my own account. Required by the app stores; reachable from the user menu. */
 export function DeleteAccountDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+  const { t } = useI18n();
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -30,7 +32,7 @@ export function DeleteAccountDialog({ open, onOpenChange }: { open: boolean; onO
       onOpenChange(false);
       router.push("/login");
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Could not delete the account. Check your connection and try again.");
+      setError(e instanceof ApiError ? e.message : t("Could not delete the account. Check your connection and try again."));
     } finally {
       setBusy(false);
     }
@@ -49,15 +51,14 @@ export function DeleteAccountDialog({ open, onOpenChange }: { open: boolean; onO
     >
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Delete my account</DialogTitle>
+          <DialogTitle>{t("Delete my account")}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-4 text-sm">
           <p className="text-muted-foreground">
-            Your name, phone number, email and login are erased and you are signed out everywhere. Orders and bills you
-            handled stay in the restaurant&apos;s records, without your name. This cannot be undone.
+            {t("Your name, phone number, email and login are erased and you are signed out everywhere. Orders and bills you handled stay in the restaurant's records, without your name. This cannot be undone.")}
           </p>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="del-pass">Enter your password to confirm</Label>
+            <Label htmlFor="del-pass">{t("Enter your password to confirm")}</Label>
             <PasswordInput id="del-pass" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
           </div>
           {error && (
@@ -68,10 +69,10 @@ export function DeleteAccountDialog({ open, onOpenChange }: { open: boolean; onO
         </div>
         <DialogFooter className="gap-2">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            {t("Cancel")}
           </Button>
           <Button variant="destructive" disabled={!password || busy} onClick={submit}>
-            Delete my account
+            {t("Delete my account")}
           </Button>
         </DialogFooter>
       </DialogContent>

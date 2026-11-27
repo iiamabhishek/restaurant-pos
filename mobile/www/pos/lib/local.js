@@ -2,6 +2,7 @@
 // the phone (IndexedDB), so the app is usable before any server exists. Later
 // the owner connects a server; the sales taken here are then matched to the
 // server's dishes by name and sent (see remapSalesToServer).
+import { planTables } from './tables.js';
 import { expenses, kv, kots, newId, orders, refunds, sales, shifts } from './store.js';
 
 const enc = new TextEncoder();
@@ -59,7 +60,30 @@ export async function saveSnap(snap) {
 }
 
 /** Add or update a dish. Returns the updated snapshot. */
-export async function upsertDish(snap, { id, name, price, taxRate, isVeg, categoryName, stock, soldOut }) {
+/**
+ * Add-ons typed one per line, "Extra cheese = 30" (price optional), into the one optional "Add-ons" group a phone dish
+ * has. Keeps the ids of add-ons that were already there, so open orders still match.
+ */
+export function parseAddOns(text, old = []) {
+  const choices = [];
+  for (const raw of String(text || '').split(/\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^(.*?)(?:\s*[=:]\s*(?:₹|rs\.?)?\s*(-?\d+(?:\.\d+)?))?$/i);
+    const name = (m[1] || '').trim().slice(0, 60);
+    const price = m[2] != null ? Number(m[2]) : 0;
+    if (!name) continue;
+    if (!Number.isFinite(price) || price < 0) throw new Error(`Add-on "${name}" needs a price of 0 or more.`);
+    if (choices.some((c) => c.name.toLowerCase() === name.toLowerCase())) continue;
+    const was = old.find((c) => c.name.toLowerCase() === name.toLowerCase());
+    choices.push({ id: was ? was.id : `loc-${newId()}`, name, price: Math.round(price * 100) / 100 });
+  }
+  if (choices.length > 30) throw new Error('Keep it to 30 add-ons or fewer.');
+  return choices;
+}
+export const addOnsText = (item) => ((item && item.options && item.options[0] && item.options[0].choices) || []).map((c) => (c.price ? `${c.name} = ${c.price}` : c.name)).join('\n');
+
+export async function upsertDish(snap, { id, name, price, taxRate, isVeg, categoryName, stock, soldOut, halfPrice, barcode, addOns }) {
   name = String(name || '').trim();
   price = Number(price);
   taxRate = Number(taxRate || 0);
@@ -85,7 +109,21 @@ export async function upsertDish(snap, { id, name, price, taxRate, isVeg, catego
     count = Number(stock);
     if (!Number.isInteger(count) || count < 0 || count > 100000) throw new Error('Stock must be a whole number, or leave it empty.');
   } else if (stock === undefined && old && old.stock != null) count = old.stock;
-  const row = { id: id || `loc-${newId()}`, categoryId, name, price: Math.round(price * 100) / 100, taxRate, isVeg: !!isVeg, sellOffline: true, stock: count, soldOut: (count != null && count <= 0) || (soldOut !== undefined ? !!soldOut : !!(old && old.soldOut)) };
+  // Half portion: blank = none.
+  let half = old ? (old.halfPrice ?? null) : null;
+  if (halfPrice !== undefined) {
+    half = String(halfPrice ?? '').trim() === '' ? null : Number(halfPrice);
+    if (half != null && (!Number.isFinite(half) || half < 0)) throw new Error('Half price must be a number, or leave it empty.');
+    if (half != null) half = Math.round(half * 100) / 100;
+  }
+  const code = barcode !== undefined ? String(barcode || '').trim().slice(0, 64) || null : (old && old.barcode) || null;
+  if (code && snap.items.some((i) => i.id !== id && i.barcode === code)) throw new Error('Another dish already has that barcode.');
+  let options = (old && old.options) || [];
+  if (addOns !== undefined) {
+    const choices = parseAddOns(addOns, (options[0] && options[0].choices) || []);
+    options = choices.length ? [{ id: (options[0] && options[0].id) || `loc-${newId()}`, name: 'Add-ons', min: 0, max: choices.length, choices }] : [];
+  }
+  const row = { id: id || `loc-${newId()}`, categoryId, name, price: Math.round(price * 100) / 100, halfPrice: half, barcode: code, options, taxRate, isVeg: !!isVeg, sellOffline: true, stock: count, soldOut: (count != null && count <= 0) || (soldOut !== undefined ? !!soldOut : !!(old && old.soldOut)) };
   const at = snap.items.findIndex((i) => i.id === row.id);
   if (at >= 0) snap.items[at] = row;
   else snap.items.push(row);
@@ -112,13 +150,24 @@ export async function remapSalesToServer(serverItems) {
     const missing = [];
     for (const line of s.items) {
       if (!String(line.menuItemId).startsWith('loc-')) continue;
-      const hit = byName.get(String(line.name).trim().toLowerCase());
-      if (hit && hit.sellOffline !== false) line.menuItemId = hit.id;
-      else missing.push(line.name);
+      const hit = byName.get(String(line.baseName || line.name).trim().toLowerCase());
+      if (!hit || hit.sellOffline === false || (line.portion === 'HALF' && hit.halfPrice == null)) {
+        missing.push(line.name);
+        continue;
+      }
+      // Phone add-ons become the server's add-ons of the same name on that dish.
+      const serverChoices = (hit.options || []).flatMap((g) => g.choices);
+      const mapped = (line.mods || []).map((m) => serverChoices.find((c) => c.name.trim().toLowerCase() === m.name.trim().toLowerCase()));
+      if (mapped.some((c) => !c)) {
+        missing.push(line.name);
+        continue;
+      }
+      line.menuItemId = hit.id;
+      line.modifierIds = mapped.map((c) => c.id);
     }
     if (missing.length) {
       s.status = 'refused';
-      s.refusedReason = `The server menu has no dish called ${[...new Set(missing)].join(', ')}.`;
+      s.refusedReason = `The server menu has no dish (or add-on) for ${[...new Set(missing)].join(', ')}.`;
       unmatched++;
     } else matched++;
     await sales.put(s);
@@ -169,6 +218,17 @@ export async function addTable(snap, floorId, { label, capacity }) {
   return saveSnap(snap);
 }
 
+/** Several tables at once (T1..T10). Checks every name first, so either all are added or none. */
+export async function addTables(snap, floorId, { prefix, from, count, capacity }) {
+  capacity = Number(capacity || 4);
+  if (!Number.isInteger(capacity) || capacity < 1 || capacity > 50) throw new Error('Seats must be a whole number from 1 to 50.');
+  const floor = snap.floors.find((f) => f.id === floorId);
+  if (!floor) throw new Error('Choose a section first.');
+  const labels = planTables({ existing: allTables(snap).map((t) => t.label), prefix, from, count });
+  for (const label of labels) floor.tables.push({ id: `loc-${newId()}`, label, capacity });
+  return saveSnap(snap);
+}
+
 /** Removing a table never touches orders: the caller refuses while one is open on it. */
 export async function removeTable(snap, tableId) {
   for (const f of snap.floors) f.tables = f.tables.filter((t) => t.id !== tableId);
@@ -190,14 +250,27 @@ export async function setSoldOut(snap, id, soldOut) {
 }
 
 /** After a sale: take sold quantities off counted dishes; a dish that reaches 0 switches itself off. */
-export async function useStock(snap, lines) {
+export async function useStock(snap, lines, alsoSet = []) {
+  // Work on a copy and only hand it back once it is saved. If the write fails the caller's snapshot is
+  // untouched, so a retry deducts exactly once instead of twice (or, when guarded, not at all).
+  // Copy only the dishes this sale touches. Cloning the whole menu on every sale made a large garbage
+  // spike on low-RAM phones.
+  const next = { ...snap, items: snap.items.slice() };
   let changed = false;
   for (const l of lines) {
-    const item = snap.items.find((i) => i.id === l.menuItemId);
-    if (!item || item.stock == null) continue;
+    const at = next.items.findIndex((i) => i.id === l.menuItemId);
+    if (at < 0 || next.items[at].stock == null) continue;
+    const item = (next.items[at] = { ...next.items[at] });
     item.stock = Math.max(0, item.stock - l.quantity);
     if (item.stock === 0) item.soldOut = true;
     changed = true;
   }
-  return changed ? saveSnap(snap) : snap;
+  if (!changed) {
+    if (alsoSet.length) await kv.setMany(alsoSet);
+    return snap;
+  }
+  // The snapshot and any marker the caller wants (e.g. "this sale's stock is deducted") commit together.
+  next.generatedAt = new Date().toISOString();
+  await kv.setMany([['snapshot', next], ...alsoSet]);
+  return next;
 }

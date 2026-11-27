@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,6 +36,7 @@ export function CancelOrderDialog({
   onOpenChange: (open: boolean) => void;
   onCancelled?: () => void;
 }) {
+  const { t } = useI18n();
   const [reason, setReason] = useState("");
   const [byGuest, setByGuest] = useState(false);
   // Set once the server says cooking has begun; the next press then confirms.
@@ -65,7 +67,7 @@ export function CancelOrderDialog({
             setStartedWarning(err.message);
             return;
           }
-          setError(err instanceof ApiError ? err.message : "Could not cancel the order. Try again.");
+          setError(err instanceof ApiError ? err.message : t("Could not cancel the order. Try again."));
         },
       },
     );
@@ -85,14 +87,13 @@ export function CancelOrderDialog({
       <DialogContent className="sm:max-w-md">
         <form onSubmit={submit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>Cancel order #{orderNumber}?</DialogTitle>
+            <DialogTitle>{t("Cancel order #{orderNumber}?", { orderNumber })}</DialogTitle>
             <DialogDescription>
-              The kitchen tickets are withdrawn and the table is freed. Nothing has been paid or taken
-              from stock yet. The order stays in History with your reason and name.
+              {t("The kitchen tickets are withdrawn and the table is freed. Nothing has been paid or taken from stock yet. The order stays in History with your reason and name.")}
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-2">
-            <Label htmlFor="cancel-reason">Reason</Label>
+            <Label htmlFor="cancel-reason">{t("Reason")}</Label>
             <Input
               id="cancel-reason"
               value={reason}
@@ -100,12 +101,12 @@ export function CancelOrderDialog({
               maxLength={200}
               required
               autoFocus
-              placeholder="Why is this order cancelled?"
+              placeholder={t("Why is this order cancelled?")}
             />
             <div className="flex flex-wrap gap-1.5">
               {REASONS.map((r) => (
                 <Button key={r} type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => setReason(r)}>
-                  {r}
+                  {t(r)}
                 </Button>
               ))}
             </div>
@@ -117,7 +118,7 @@ export function CancelOrderDialog({
               checked={byGuest}
               onChange={(e) => setByGuest(e.target.checked)}
             />
-            The guest asked to cancel
+            {t("The guest asked to cancel")}
           </label>
           {startedWarning && (
             <p role="alert" className="rounded-lg bg-warning/10 px-3 py-2 text-sm text-warning">
@@ -131,7 +132,7 @@ export function CancelOrderDialog({
           )}
           <DialogFooter>
             <Button type="button" variant="outline" className="h-11" onClick={() => onOpenChange(false)}>
-              Keep order
+              {t("Keep order")}
             </Button>
             <Button
               type="submit"
@@ -139,7 +140,7 @@ export function CancelOrderDialog({
               className="h-11"
               disabled={cancel.isPending || reason.trim().length === 0}
             >
-              {cancel.isPending ? "Cancelling…" : startedWarning ? "Cancel anyway" : "Cancel order"}
+              {cancel.isPending ? t("Cancelling…") : startedWarning ? t("Cancel anyway") : t("Cancel order")}
             </Button>
           </DialogFooter>
         </form>

@@ -32,7 +32,12 @@ on:
     paths:
       - "apps/backend/**"
       - "apps/web/**"
+      - "updater/**"
       - "packages/types/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "package.json"
+      - "turbo.json"
       - ".github/workflows/docker-publish.yml"
   workflow_dispatch:
     inputs:
@@ -90,13 +95,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [nodedr-restaurant-pos-backend, nodedr-restaurant-pos-web]
+        image: [nodedr-restaurant-pos-backend, nodedr-restaurant-pos-web, nodedr-restaurant-pos-updater]
         platform: [linux/amd64, linux/arm64]
         include:
           - image: nodedr-restaurant-pos-backend
             dockerfile: apps/backend/Dockerfile
+            context: .
           - image: nodedr-restaurant-pos-web
             dockerfile: apps/web/Dockerfile
+            context: .
+          # updater/Dockerfile copies server.js relative to its own folder
+          - image: nodedr-restaurant-pos-updater
+            dockerfile: updater/Dockerfile
+            context: updater
           - platform: linux/amd64
             runner: ubuntu-latest
             slug: amd64
@@ -116,7 +127,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           # web needs the backend URL baked in at build time (Next.js rewrites
           # resolve at build). APP_VERSION is only used by the backend image.
@@ -145,7 +156,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        image: [nodedr-restaurant-pos-backend, nodedr-restaurant-pos-web]
+        image: [nodedr-restaurant-pos-backend, nodedr-restaurant-pos-web, nodedr-restaurant-pos-updater]
     steps:
       - uses: actions/download-artifact@v4
         with:

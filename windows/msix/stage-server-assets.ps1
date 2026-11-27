@@ -262,7 +262,7 @@ Copy-Item -Path (Join-Path $RepoRoot 'apps\backend\dist') -Destination (Join-Pat
 # README.md, .env.example, eslint config, tsconfig, etc.) — legitimate
 # for a real deploy, but bloat/leak risk for a shipped MSIX and would trip
 # validate-msix.ps1's dev-artifact checks. Keep only what's needed to run.
-$keepTopLevel = @('node_modules', 'dist', 'prisma', 'package.json')
+$keepTopLevel = @('node_modules', 'dist', 'prisma', 'prisma.config.ts', 'package.json')
 Get-ChildItem -Path $backendDeployTemp | Where-Object { $keepTopLevel -notcontains $_.Name } |
     Remove-Item -Recurse -Force
 
@@ -464,5 +464,25 @@ if ($strayEnvFiles) {
     Write-Host "   Removing $($strayEnvFiles.Count) file(s): $(($strayEnvFiles | Select-Object -First 5 -ExpandProperty Name) -join ', ')" -ForegroundColor DarkGray
     $strayEnvFiles | Remove-Item -Force
 }
+
+# --- 7. Prune build-only files and write the update manifest ----------------
+# See finalize-server-payload.js: removes ~430 MB / ~20,000 files nothing reads
+# at runtime, then writes runtime-manifest.tsv so the launcher can copy only
+# the files an update actually changed.
+Write-Host "-- Pruning build-only files and writing runtime-manifest.tsv" -ForegroundColor Yellow
+& node (Join-Path $PSScriptRoot 'finalize-server-payload.js') $serverDir
+if ($LASTEXITCODE -ne 0) { throw "finalize-server-payload.js failed with exit code $LASTEXITCODE" }
+# Pruning must not have removed anything migrations need.
+& node $prismaCliPath --version | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "The staged prisma CLI no longer starts after pruning (exit $LASTEXITCODE)." }
+
+# Pruning must not have removed anything the web app needs either. The earlier smoke test (before pruning) only
+# proves the server survives 5 seconds; this loads the login page from the FINAL payload with the staged Node and
+# fetches every script/style/font file it references - what a browser does, and what a damaged payload fails.
+Write-Host "-- Smoke-testing the pruned web payload (login page + every file it loads)" -ForegroundColor Yellow
+& node (Join-Path $PSScriptRoot 'smoke-web-payload.js') $serverDir (Join-Path $nodeStage 'node.exe')
+if ($LASTEXITCODE -ne 0) { throw "The pruned web payload cannot serve its login page and files (exit $LASTEXITCODE)." }
+# The smoke test lets Next write its caches next to the build output; none of that belongs in the package.
+Remove-Item -Recurse -Force (Join-Path $webStage 'apps\web\.next\cache'), (Join-Path $webStage 'apps\web\.next\server\route-cache') -ErrorAction SilentlyContinue
 
 Write-Host "Done staging server assets at $serverDir" -ForegroundColor Green

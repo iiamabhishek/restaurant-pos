@@ -82,3 +82,26 @@ export function decryptSecret(stored: string, context: string): string {
     decipher.final(),
   ]).toString('utf8');
 }
+
+/**
+ * Seal a value stored in a plain String column. Pair with openStored(), which
+ * also accepts values written before sealing existed, so no data migration is
+ * needed: legacy plaintext keeps working and is re-sealed on the next write.
+ */
+export function sealStored(plain: string, context: string): string {
+  return encryptSecret(plain, context);
+}
+
+export function openStored(stored: string, context: string): string {
+  if (!stored.startsWith(`${VERSION}.`)) return stored;
+  try {
+    return decryptSecret(stored, context);
+  } catch {
+    // Not one of ours (a legacy plaintext that happens to start with "v1.").
+    return stored;
+  }
+}
+
+export function isSealed(stored: string): boolean {
+  return stored.startsWith(`${VERSION}.`) && stored.split('.').length === 4;
+}

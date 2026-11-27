@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat, type StaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { useSearchParams } from "next/navigation";
 import { StatusNote, useNoteToast } from "@/components/ui/status-note";
 import { AdjustLineDialog, PayRunDialog, SlipButton } from "@/components/team/payroll-dialogs";
@@ -20,18 +22,19 @@ import {
   useShifts,
 } from "@/hooks/use-hr";
 import { ApiError } from "@/lib/api";
-import { formatCurrency } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const addDays = (d: Date, n: number) => new Date(d.getTime() + n * 86_400_000);
-const errMsg = (e: unknown) => (e instanceof ApiError ? e.message : "Something went wrong");
-const fmtDate = (s: string) => new Date(s).toLocaleDateString([], { day: "numeric", month: "short" });
-const fmtTime = (s: string) => new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const errMsg = (e: unknown, fallback: string) => (e instanceof ApiError ? e.message : fallback);
+const fmtDate = (fmt: StaffFormat, s: string) => new Date(s).toLocaleDateString(fmt.localeTag, { day: "numeric", month: "short" });
+const fmtTime = (fmt: StaffFormat, s: string) => new Date(s).toLocaleTimeString(fmt.localeTag, { hour: "2-digit", minute: "2-digit" });
 const TABS = ["schedule", "leave", "payroll", "performance"] as const;
 type Tab = (typeof TABS)[number];
 
 function Schedule({ branchId }: { branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const [from, setFrom] = useState(() => iso(new Date()));
   const to = iso(addDays(new Date(from), 6));
   const { data: shifts, isLoading } = useShifts(branchId, from, to);
@@ -40,14 +43,14 @@ function Schedule({ branchId }: { branchId: string | null }) {
   const [form, setForm] = useState({ userId: "", date: iso(new Date()), start: "09:00", end: "17:00" });
 
   const submit = () => {
-    if (!form.userId) return toast.error("Pick a staff member");
+    if (!form.userId) return toast.error(t("Pick a staff member"));
     addShift.mutate(
       {
         userId: form.userId,
         startsAt: new Date(`${form.date}T${form.start}`).toISOString(),
         endsAt: new Date(`${form.date}T${form.end}`).toISOString(),
       },
-      { onSuccess: () => toast.success("Shift added"), onError: (e) => toast.error(errMsg(e)) },
+      { onSuccess: () => toast.success(t("Shift added")), onError: (e) => toast.error(errMsg(e, t("Something went wrong"))) },
     );
   };
 
@@ -55,12 +58,12 @@ function Schedule({ branchId }: { branchId: string | null }) {
     <div className="flex flex-col gap-4">
       <Card className="grid gap-3 p-4 sm:grid-cols-5">
         <select
-          aria-label="Staff"
+          aria-label={t("Staff")}
           value={form.userId}
           onChange={(e) => setForm({ ...form, userId: e.target.value })}
           className="rounded-lg border border-border bg-background px-2 py-2 text-sm"
         >
-          <option value="">Staff…</option>
+          <option value="">{t("Staff…")}</option>
           {staff?.map((s) => (
             <option key={s.userId} value={s.userId}>
               {s.name}
@@ -70,12 +73,12 @@ function Schedule({ branchId }: { branchId: string | null }) {
         <Input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
         <Input type="time" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} />
         <Input type="time" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} />
-        <Button onClick={submit} disabled={addShift.isPending}>Add shift</Button>
+        <Button onClick={submit} disabled={addShift.isPending}>{t("Add shift")}</Button>
       </Card>
       <div className="flex items-center gap-2 text-sm">
-        <Button size="sm" variant="outline" onClick={() => setFrom(iso(addDays(new Date(from), -7)))}>← Prev</Button>
-        <span className="text-muted-foreground">{fmtDate(from)} – {fmtDate(to)}</span>
-        <Button size="sm" variant="outline" onClick={() => setFrom(iso(addDays(new Date(from), 7)))}>Next →</Button>
+        <Button size="sm" variant="outline" onClick={() => setFrom(iso(addDays(new Date(from), -7)))}>{t("← Prev")}</Button>
+        <span className="text-muted-foreground">{fmtDate(fmt, from)} – {fmtDate(fmt, to)}</span>
+        <Button size="sm" variant="outline" onClick={() => setFrom(iso(addDays(new Date(from), 7)))}>{t("Next →")}</Button>
       </div>
       <Card className="flex flex-col divide-y divide-border p-2">
         {isLoading ? (
@@ -85,13 +88,13 @@ function Schedule({ branchId }: { branchId: string | null }) {
             <div key={s.id} className="flex items-center justify-between gap-3 px-4 py-3 text-sm">
               <span className="font-medium text-foreground">{s.user.name}</span>
               <span className="text-muted-foreground">
-                {fmtDate(s.startsAt)} · {fmtTime(s.startsAt)} – {fmtTime(s.endsAt)}
+                {fmtDate(fmt, s.startsAt)} · {fmtTime(fmt, s.startsAt)} – {fmtTime(fmt, s.endsAt)}
               </span>
-              <Button size="sm" variant="outline" onClick={() => deleteShift.mutate(s.id)}>Remove</Button>
+              <Button size="sm" variant="outline" onClick={() => deleteShift.mutate(s.id)}>{t("Remove")}</Button>
             </div>
           ))
         ) : (
-          <p className="p-6 text-center text-sm text-muted-foreground">No shifts this week.</p>
+          <p className="p-6 text-center text-sm text-muted-foreground">{t("No shifts this week.")}</p>
         )}
       </Card>
     </div>
@@ -99,6 +102,8 @@ function Schedule({ branchId }: { branchId: string | null }) {
 }
 
 function Leave({ branchId }: { branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data, isLoading } = useLeave(branchId);
   const { decideLeave } = useHrActions(branchId);
   return (
@@ -110,35 +115,37 @@ function Leave({ branchId }: { branchId: string | null }) {
           <div key={l.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm">
             <div>
               <p className="font-medium text-foreground">
-                {l.user?.name} · {l.type.toLowerCase()}
+                {l.user?.name} · {fmt.code(l.type)}
               </p>
               <p className="text-xs text-muted-foreground">
-                {fmtDate(l.startDate)} – {fmtDate(l.endDate)}
+                {fmtDate(fmt, l.startDate)} – {fmtDate(fmt, l.endDate)}
                 {l.reason && ` · ${l.reason}`}
               </p>
             </div>
             {l.status === "PENDING" ? (
               <div className="flex gap-2">
-                <Button size="sm" onClick={() => decideLeave.mutate({ id: l.id, status: "APPROVED" }, { onError: (e) => toast.error(errMsg(e)) })}>
-                  Approve
+                <Button size="sm" onClick={() => decideLeave.mutate({ id: l.id, status: "APPROVED" }, { onError: (e) => toast.error(errMsg(e, t("Something went wrong"))) })}>
+                  {t("Approve")}
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => decideLeave.mutate({ id: l.id, status: "REJECTED" }, { onError: (e) => toast.error(errMsg(e)) })}>
-                  Reject
+                <Button size="sm" variant="outline" onClick={() => decideLeave.mutate({ id: l.id, status: "REJECTED" }, { onError: (e) => toast.error(errMsg(e, t("Something went wrong"))) })}>
+                  {t("Reject")}
                 </Button>
               </div>
             ) : (
-              <span className="text-xs text-muted-foreground">{l.status.toLowerCase()}</span>
+              <span className="text-xs text-muted-foreground">{fmt.code(l.status)}</span>
             )}
           </div>
         ))
       ) : (
-        <p className="p-6 text-center text-sm text-muted-foreground">No leave requests.</p>
+        <p className="p-6 text-center text-sm text-muted-foreground">{t("No leave requests.")}</p>
       )}
     </Card>
   );
 }
 
 function RunDetail({ branchId, id }: { branchId: string | null; id: string }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data } = usePayrollRun(branchId, id);
   const { finalizeRun, deleteRun } = useHrActions(branchId);
   const [adjusting, setAdjusting] = useState<string | null>(null);
@@ -150,23 +157,20 @@ function RunDetail({ branchId, id }: { branchId: string | null; id: string }) {
   return (
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-medium text-foreground">
-          {fmtDate(data.periodStart)} – {fmtDate(data.periodEnd)} · {data.status.toLowerCase()} · tip pool{" "}
-          {formatCurrency(data.tipPool)}
-          {data.status === "PAID" && data.paidAt
-            ? ` · paid ${fmtDate(data.paidAt)}${data.paymentMethod ? ` by ${data.paymentMethod.replace("_", " ").toLowerCase()}` : ""}`
+        <p className="text-sm font-medium text-foreground">{t("{fmtDate} – {fmtDate2} · {code} · tip pool {currency}", { fmtDate: fmtDate(fmt, data.periodStart), fmtDate2: fmtDate(fmt, data.periodEnd), code: fmt.code(data.status), currency: fmt.currency(data.tipPool) })}{data.status === "PAID" && data.paidAt
+            ? t(" · paid {fmtDate}{value}", { fmtDate: fmtDate(fmt, data.paidAt), value: data.paymentMethod ? t(" by {code}", { code: fmt.code(data.paymentMethod) }) : "" })
             : ""}
         </p>
         {data.status === "DRAFT" && (
           <div className="flex gap-2">
-            <Button size="sm" onClick={() => finalizeRun.mutate(id, { onSuccess: () => runToast.success("Payroll finalized - adjustments are now locked"), onError: (e) => runToast.error(errMsg(e)) })}>
-              Finalize
+            <Button size="sm" onClick={() => finalizeRun.mutate(id, { onSuccess: () => runToast.success(t("Payroll finalized - adjustments are now locked")), onError: (e) => runToast.error(errMsg(e, t("Something went wrong"))) })}>
+              {t("Finalize")}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => deleteRun.mutate(id, { onError: (e) => runToast.error(errMsg(e)) })}>Discard draft</Button>
+            <Button size="sm" variant="outline" onClick={() => deleteRun.mutate(id, { onError: (e) => runToast.error(errMsg(e, t("Something went wrong"))) })}>{t("Discard draft")}</Button>
           </div>
         )}
         {data.status === "FINALIZED" && (
-          <Button size="sm" onClick={() => setPaying(true)}>Mark as paid</Button>
+          <Button size="sm" onClick={() => setPaying(true)}>{t("Mark as paid")}</Button>
         )}
       </div>
       <StatusNote note={note} onClear={clear} />
@@ -174,9 +178,9 @@ function RunDetail({ branchId, id }: { branchId: string | null; id: string }) {
         <table className="w-full min-w-[640px] text-sm">
           <thead className="text-left text-xs text-muted-foreground">
             <tr>
-              <th className="py-1">Staff</th><th>Hours</th><th>Base</th><th>Leave −</th><th>Tips</th>
-              <th>Allow. +</th><th>Bonus +</th><th>Advance −</th><th>Other −</th>
-              <th className="text-right">Net</th><th />
+              <th className="py-1">{t("Staff")}</th><th>{t("Hours")}</th><th>{t("Base")}</th><th>{t("Leave −")}</th><th>{t("Tips")}</th>
+              <th>{t("Allow. +")}</th><th>{t("Bonus +")}</th><th>{t("Advance −")}</th><th>{t("Other −")}</th>
+              <th className="text-right">{t("Net")}</th><th />
             </tr>
           </thead>
           <tbody>
@@ -184,18 +188,18 @@ function RunDetail({ branchId, id }: { branchId: string | null; id: string }) {
               <tr key={l.id} className="border-t border-border">
                 <td className="py-1.5">{l.user.name}</td>
                 <td>{l.hoursWorked}</td>
-                <td>{formatCurrency(l.basePay)}</td>
-                <td>{formatCurrency(l.unpaidLeaveDeduction)}</td>
-                <td>{formatCurrency(l.tipShare)}</td>
-                <td>{formatCurrency(l.allowances)}</td>
-                <td>{formatCurrency(l.bonus)}</td>
-                <td>{formatCurrency(l.advanceRecovery)}</td>
-                <td>{formatCurrency(l.otherDeductions)}</td>
-                <td className="text-right font-medium">{formatCurrency(l.netPay)}</td>
+                <td>{fmt.currency(l.basePay)}</td>
+                <td>{fmt.currency(l.unpaidLeaveDeduction)}</td>
+                <td>{fmt.currency(l.tipShare)}</td>
+                <td>{fmt.currency(l.allowances)}</td>
+                <td>{fmt.currency(l.bonus)}</td>
+                <td>{fmt.currency(l.advanceRecovery)}</td>
+                <td>{fmt.currency(l.otherDeductions)}</td>
+                <td className="text-right font-medium">{fmt.currency(l.netPay)}</td>
                 <td className="whitespace-nowrap text-right">
                   {editable && (
                     <Button size="sm" variant="ghost" className="h-8 px-2" onClick={() => setAdjusting(l.user.id)}>
-                      Adjust
+                      {t("Adjust")}
                     </Button>
                   )}
                   <SlipButton branchId={branchId} runId={id} userId={l.user.id} />
@@ -205,7 +209,7 @@ function RunDetail({ branchId, id }: { branchId: string | null; id: string }) {
           </tbody>
         </table>
       </div>
-      <p className="text-right text-sm font-semibold">Total {formatCurrency(data.totalNet)}</p>
+      <p className="text-right text-sm font-semibold">{t("Total {formatCurrency}", { formatCurrency: fmt.currency(data.totalNet) })}</p>
       {adjustingLine && (
         <AdjustLineDialog key={adjustingLine.id} branchId={branchId} runId={id} line={adjustingLine} onClose={() => setAdjusting(null)} />
       )}
@@ -215,6 +219,8 @@ function RunDetail({ branchId, id }: { branchId: string | null; id: string }) {
 }
 
 function Payroll({ branchId }: { branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const { data: pay } = usePay(branchId);
   const { data: runs } = usePayrollRuns(branchId);
   const { setPay, createRun } = useHrActions(branchId);
@@ -225,44 +231,56 @@ function Payroll({ branchId }: { branchId: string | null }) {
     return { start: iso(first), end: iso(last) };
   });
   const [open, setOpen] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Record<string, { payType: "MONTHLY" | "HOURLY"; rate: string }>>({});
+  const [draft, setDraft] = useState<Record<string, { payType: "MONTHLY" | "HOURLY"; rate: string; ot: string; mult: string; grace: string; absent: boolean }>>({});
 
   return (
     <div className="flex flex-col gap-4">
       <Card className="flex flex-col gap-3 p-4">
-        <p className="text-sm font-medium text-foreground">Pay rates</p>
+        <p className="text-sm font-medium text-foreground">{t("Pay rates")}</p>
         {pay?.map((p) => {
-          const d = draft[p.userId] ?? { payType: p.payType ?? "MONTHLY", rate: String(p.rate ?? "") };
+          const d = draft[p.userId] ?? { payType: p.payType ?? "MONTHLY", rate: String(p.rate ?? ""), ot: p.overtimeAfterHours != null ? String(p.overtimeAfterHours) : "", mult: String(p.overtimeMultiplier ?? 1.5), grace: p.lateGraceMinutes != null ? String(p.lateGraceMinutes) : "", absent: !!p.deductAbsence };
           return (
             <div key={p.userId} className="flex flex-wrap items-center gap-2 text-sm">
               <span className="w-40 truncate">{p.name}</span>
               <select
-                aria-label="Pay type"
+                aria-label={t("Pay type")}
                 value={d.payType}
                 onChange={(e) => setDraft({ ...draft, [p.userId]: { ...d, payType: e.target.value as "MONTHLY" | "HOURLY" } })}
                 className="rounded-lg border border-border bg-background px-2 py-1.5"
               >
-                <option value="MONTHLY">Monthly</option>
-                <option value="HOURLY">Hourly</option>
+                <option value="MONTHLY">{t("Monthly")}</option>
+                <option value="HOURLY">{t("Hourly")}</option>
               </select>
               <Input
                 className="w-28"
                 inputMode="decimal"
-                placeholder="Rate"
+                placeholder={t("Rate")}
                 value={d.rate}
                 onChange={(e) => setDraft({ ...draft, [p.userId]: { ...d, rate: e.target.value } })}
               />
+              {d.payType === "HOURLY" && (
+                <>
+                  <Input aria-label={t("Overtime after hours a day")} className="w-28" inputMode="decimal" placeholder={t("OT after h/day")} value={d.ot} onChange={(e) => setDraft({ ...draft, [p.userId]: { ...d, ot: e.target.value } })} />
+                  <Input aria-label={t("Overtime multiplier")} className="w-20" inputMode="decimal" placeholder="x1.5" value={d.mult} onChange={(e) => setDraft({ ...draft, [p.userId]: { ...d, mult: e.target.value } })} />
+                </>
+              )}
+              {d.payType === "MONTHLY" && (
+                <>
+                  <Input aria-label={t("Late grace minutes")} className="w-28" inputMode="numeric" placeholder={t("Late after (min)")} value={d.grace} onChange={(e) => setDraft({ ...draft, [p.userId]: { ...d, grace: e.target.value } })} />
+                  <label className="flex items-center gap-1.5 text-xs text-muted-foreground"><input type="checkbox" checked={d.absent} onChange={(e) => setDraft({ ...draft, [p.userId]: { ...d, absent: e.target.checked } })} /> {t("Deduct absent days")}</label>
+                </>
+              )}
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() =>
                   setPay.mutate(
-                    { userId: p.userId, payType: d.payType, rate: Number(d.rate) },
-                    { onSuccess: () => toast.success("Saved"), onError: (e) => toast.error(errMsg(e)) },
+                    { userId: p.userId, payType: d.payType, rate: Number(d.rate), overtimeAfterHours: d.ot ? Number(d.ot) : null, overtimeMultiplier: d.mult ? Number(d.mult) : undefined, lateGraceMinutes: d.grace.trim() !== "" ? Number(d.grace) : null, deductAbsence: d.absent },
+                    { onSuccess: () => toast.success(t("Saved")), onError: (e) => toast.error(errMsg(e, t("Something went wrong"))) },
                   )
                 }
               >
-                Save
+                {t("Save")}
               </Button>
             </div>
           );
@@ -277,16 +295,19 @@ function Payroll({ branchId }: { branchId: string | null }) {
             createRun.mutate(
               { periodStart: period.start, periodEnd: period.end },
               {
-                onSuccess: (r) => setOpen((r as { id: string }).id),
-                onError: (e) => toast.error(errMsg(e)),
+                onSuccess: (r) => {
+                  setOpen((r as { id: string }).id);
+                  for (const w of (r as { warnings?: string[] }).warnings ?? []) toast.error(w);
+                },
+                onError: (e) => toast.error(errMsg(e, t("Something went wrong"))),
               },
             )
           }
         >
-          Run payroll
+          {t("Run payroll")}
         </Button>
         <p className="w-full text-xs text-muted-foreground">
-          Uses clocked hours from Attendance, approved unpaid leave, and splits the period&rsquo;s tips by hours worked.
+          {t("Uses clocked hours from Attendance, approved unpaid leave, and splits the period’s tips by hours worked.")}
         </p>
       </Card>
       {runs?.map((r) => (
@@ -296,8 +317,8 @@ function Payroll({ branchId }: { branchId: string | null }) {
             onClick={() => setOpen(open === r.id ? null : r.id)}
             className="flex items-center justify-between rounded-xl border border-border px-4 py-3 text-left text-sm hover:bg-secondary"
           >
-            <span>{fmtDate(r.periodStart)} – {fmtDate(r.periodEnd)} · {r.status.toLowerCase()}</span>
-            <span className="font-medium">{formatCurrency(r.totalNet)}</span>
+            <span>{fmtDate(fmt, r.periodStart)} – {fmtDate(fmt, r.periodEnd)} · {fmt.code(r.status)}</span>
+            <span className="font-medium">{fmt.currency(r.totalNet)}</span>
           </button>
           {open === r.id && <RunDetail branchId={branchId} id={r.id} />}
         </div>
@@ -307,6 +328,8 @@ function Payroll({ branchId }: { branchId: string | null }) {
 }
 
 function Performance({ branchId }: { branchId: string | null }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const [range, setRange] = useState(() => ({ from: iso(addDays(new Date(), -29)), to: iso(new Date()) }));
   const { data, isLoading } = usePerformance(branchId, range.from, range.to);
   return (
@@ -321,17 +344,17 @@ function Performance({ branchId }: { branchId: string | null }) {
         ) : (
           <table className="w-full text-sm">
             <thead className="text-left text-xs text-muted-foreground">
-              <tr><th className="py-1">Staff</th><th>Orders</th><th>Sales</th><th>Tips</th><th>Hours</th><th className="text-right">Sales / hour</th></tr>
+              <tr><th className="py-1">{t("Staff")}</th><th>{t("Orders")}</th><th>{t("Sales")}</th><th>{t("Tips")}</th><th>{t("Hours")}</th><th className="text-right">{t("Sales / hour")}</th></tr>
             </thead>
             <tbody>
               {data?.map((r) => (
                 <tr key={r.userId} className="border-t border-border">
                   <td className="py-1.5">{r.name}</td>
                   <td>{r.orders}</td>
-                  <td>{formatCurrency(r.sales)}</td>
-                  <td>{formatCurrency(r.tips)}</td>
+                  <td>{fmt.currency(r.sales)}</td>
+                  <td>{fmt.currency(r.tips)}</td>
                   <td>{r.hoursWorked}</td>
-                  <td className="text-right">{r.salesPerHour == null ? "—" : formatCurrency(r.salesPerHour)}</td>
+                  <td className="text-right">{r.salesPerHour == null ? "—" : fmt.currency(r.salesPerHour)}</td>
                 </tr>
               ))}
             </tbody>
@@ -343,6 +366,7 @@ function Performance({ branchId }: { branchId: string | null }) {
 }
 
 function TeamView() {
+  const { t: translate } = useI18n();
   const { branchId } = useBranch();
   const params = useSearchParams();
   const [tab, setTab] = useState<Tab>(() => {
@@ -352,8 +376,8 @@ function TeamView() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Team</h1>
-        <p className="text-sm text-muted-foreground">Schedules, leave, payroll and performance</p>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{translate("Team")}</h1>
+        <p className="text-sm text-muted-foreground">{translate("Schedules, leave, payroll and performance")}</p>
       </div>
       <div className="flex flex-wrap gap-2">
         {TABS.map((t) => (
@@ -366,7 +390,7 @@ function TeamView() {
               tab === t ? "border-primary bg-primary text-primary-foreground" : "border-border text-muted-foreground hover:bg-secondary",
             )}
           >
-            {t}
+            {translate(t)}
           </button>
         ))}
       </div>

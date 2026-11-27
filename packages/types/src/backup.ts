@@ -26,3 +26,48 @@ export const setBackupConfigSchema = z.object({
   retainCount: z.coerce.number().int().min(1).max(10).optional(),
 });
 export type SetBackupConfigDto = z.infer<typeof setBackupConfigSchema>;
+
+const backupTimeZone = z
+  .string()
+  .min(1)
+  .refine((timeZone) => {
+    // Some Intl implementations also accept raw offsets. Calendar schedules
+    // use named zones so future offset changes follow the local clock.
+    if (/^[+-]/.test(timeZone)) return false;
+    try {
+      new Intl.DateTimeFormat("en", { timeZone });
+      return true;
+    } catch {
+      return false;
+    }
+  }, "Expected an IANA time zone");
+
+const backupClock = {
+  time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Expected HH:mm"),
+  timeZone: backupTimeZone,
+};
+
+export const backupScheduleSchema = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("interval"),
+    intervalDays: z.number().int().min(1).max(30),
+  }),
+  z.object({ mode: z.literal("daily"), ...backupClock }),
+  z.object({
+    mode: z.literal("weekly"),
+    weekday: z.number().int().min(0).max(6),
+    ...backupClock,
+  }),
+  z.object({
+    mode: z.literal("monthly"),
+    dayOfMonth: z.number().int().min(1).max(31),
+    ...backupClock,
+  }),
+]);
+export type BackupSchedule = z.infer<typeof backupScheduleSchema>;
+
+export const setBackupScheduleSchema = z.object({
+  schedule: backupScheduleSchema,
+  retainCount: z.number().int().min(1).max(10),
+});
+export type SetBackupScheduleDto = z.infer<typeof setBackupScheduleSchema>;

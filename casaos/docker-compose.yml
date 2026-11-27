@@ -23,7 +23,7 @@ services:
       - nodedr-restaurant-pos
 
   backend:
-    image: ghcr.io/raktim94/nodedr-restaurant-pos-backend:1.22.1
+    image: ghcr.io/raktim94/nodedr-restaurant-pos-backend:1.47.0
     container_name: nodedr-restaurant-pos-backend
     hostname: nodedr-restaurant-pos-backend
     restart: unless-stopped
@@ -85,7 +85,7 @@ services:
             en_US: Auto-generated login security key. Created automatically on first launch — leave it alone.
 
   web:
-    image: ghcr.io/raktim94/nodedr-restaurant-pos-web:1.22.1
+    image: ghcr.io/raktim94/nodedr-restaurant-pos-web:1.47.0
     container_name: nodedr-restaurant-pos-web
     hostname: nodedr-restaurant-pos-web
     restart: unless-stopped
@@ -106,11 +106,11 @@ services:
 
   # In-app "Update now" (Settings > Updates): pulls the newer OrderRestro
   # images above and recreates those two containers (nothing else). Needs the
-  # Docker socket to do that; data in /DATA/AppData is untouched. The updater
-  # image is generic (it only manages the containers named below), so the
-  # one published for NodeDR POS is reused.
+  # Docker socket to do that; data in /DATA/AppData is untouched. This repo's
+  # own hardened updater is published by .github/workflows/docker-publish.yml;
+  # :edge tracks master until the next version tag publishes a pinned tag.
   updater:
-    image: ghcr.io/raktim94/nodedr-pos-updater:1.5.1
+    image: ghcr.io/raktim94/nodedr-restaurant-pos-updater:edge
     container_name: nodedr-restaurant-pos-updater
     hostname: nodedr-restaurant-pos-updater
     restart: unless-stopped
@@ -183,10 +183,38 @@ x-casaos:
   index: /
   scheme: http
   port_map: "1995"
-  version: "1.22.1"
-  update_at: "2026-11-06"
+  version: "1.39.2"
+  update_at: "2026-11-27"
   release_notes:
     en_US: |-
+      1.47.0: The staff dashboard now follows the language picker on every page (English, Spanish, French, Brazilian Portuguese). Menu has a Paused view listing dishes by return time. Paid bills, refunds, supplier payments and points entries are kept when an order, invoice or customer is deleted. Includes two database changes; update straight from 1.46.0. Android 1.47.0 keeps Nearby phone-to-phone copies.
+
+      1.46.0: Pause a dish until a return time. Server sync fixed: a large backlog could skip rows (update both ends). Disagreeing edits between devices are kept for a manager to review, and the sync page says plainly what is only saved on this PC. Restores check backup checksums. Three additive database migrations.
+
+      1.45.0: Split a bill by guest, purchase returns with supplier credit, a price-variance check and a smarter shopping list, expense approvals and a petty cash box, a balanced accounting journal export, a customer delivery tracking link, and reports that reach back five years with a read-only bill view. Two additive database migrations.
+
+      1.44.0: Reports rebuilt. Daily sales now has a totals line and opens every bill of a day; a new All bills (day book) report lists each invoice with time, payment, discount, tax, refunds and who billed it, and exports to Excel, PDF or CSV. Order history can be searched by any date range, and an admin can delete a finished bill from its detail window (password asked, a record stays in the Audit Log). The Audit Log can be exported and is now permanent: nobody, admins included, can edit or delete entries. One additive database migration.
+
+      1.42.2: fixes a rare failure in 1.42.1 where several payment attempts for the same bill at the same moment could all fail with an error (nothing was charged); stock journal actions are also safe under the same load. Update straight to this version. No database migration.
+
+      1.42.1: safety and reliability fixes. Two tills can no longer overpay one bill; gift-card refunds credit exactly what was refunded; unclear online-refund answers keep the hold for review and owners can close a reviewed entry; a DENY permission override also removes an implied permission; GST report matches the bills; customer dues stay fast on big lists; stock receipts, stock takes and recipes are safer; the phone app resumes an interrupted sale and keeps numbering after a restore; backup and sync credentials are encrypted at rest. No database migration.
+
+      1.42.0: customer dues, a ledger of unpaid and part-paid bills with filters, later payments and a WhatsApp reminder you review and send; a guest bill QR; reservations can no longer double-book a table; the phone backup now keeps unsent expenses, refunds and reservations; currency follows the restaurant setting; stock rows are locked during receipts and transfers; security, payment-recovery, backup and updater fixes from community pull requests. No database migration.
+
+      1.41.1: fixes a server that would not start in 1.41.0. No database migration.
+
+      1.41.0: the phone app asks whether to connect to a server or run on the phone alone, add several tables at once, a clearer credit-sale (part payment) screen with a dues ageing summary, and Android file downloads in server mode. No database migration.
+
+      1.40.1: a hardware barcode scanner works anywhere on the phone Sell screen, web POS scanning by barcode or SKU, archived menu items hidden, and an AI Operations Copilot that respects the signed-in user's permissions. No database migration.
+
+      1.40.0: Stock Journal recipes per product and reopenable drafts, optional customer PIN code and status, and the Stock Journal on the phone. Database migration applied automatically on update.
+
+      1.39.2: optional "Show cost today" switch on the POS, and new finished products from the Stock Journal go on the menu by default. No database migration.
+
+      1.39.1: Stock Journal Manager role, and producing menu items directly from the Stock Journal. Database migration applied automatically on update.
+
+      1.39.0: next-generation interface, faster startup and a new mobile release. Database migration applied automatically on update.
+
       1.22.1: the Android app keeps the kitchen board working with no connection. Tickets stay on
       screen, can be moved along, and are sent when the connection is back.
 

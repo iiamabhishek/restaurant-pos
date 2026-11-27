@@ -26,6 +26,14 @@ export function effectivePermissions(
     (o) => !o.expiresAt || o.expiresAt.getTime() > now.getTime(),
   );
   for (const o of live) if (o.effect === 'GRANT') keys.add(o.permission.key);
-  for (const o of live) if (o.effect === 'DENY') keys.delete(o.permission.key);
+  for (const o of live) {
+    if (o.effect !== 'DENY') continue;
+    keys.delete(o.permission.key);
+    // Deleting the key alone is not enough: permissionSatisfied() would still
+    // grant it through PERMISSION_IMPLIES (e.g. menu.manage -> menu.view).
+    // A sentinel makes the denial first-class wherever permissions are
+    // evaluated, while keeping an expired DENY completely inert.
+    keys.add(`!${o.permission.key}`);
+  }
   return [...keys];
 }

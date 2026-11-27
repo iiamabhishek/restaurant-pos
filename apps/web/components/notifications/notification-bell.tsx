@@ -1,6 +1,8 @@
 "use client";
 
+import { type Translate, useI18n } from "@/lib/i18n/context";
 import { Bell, CheckCheck, Volume2, VolumeX } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef } from "react";
 import { io } from "socket.io-client";
 import { useQueryClient } from "@tanstack/react-query";
@@ -28,15 +30,15 @@ import { resolveWsUrl } from "@/lib/ws-url";
 // listed yet (module-level: only one bell is ever mounted).
 const socketAnnounce = { pending: 0 };
 
-function timeAgo(iso: string): string {
+function timeAgo(t: Translate, iso: string): string {
   const seconds = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
-  if (seconds < 60) return "just now";
+  if (seconds < 60) return t("just now");
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return t("{minutes}m ago", { minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return t("{hours}h ago", { hours });
   const days = Math.round(hours / 24);
-  return `${days}d ago`;
+  return t("{days}d ago", { days });
 }
 
 // Bell + unread badge for the dashboard topbar (mounted once in AppShell so
@@ -47,6 +49,8 @@ function timeAgo(iso: string): string {
 // this component never needs to filter events client-side; anything it
 // receives is genuinely meant for the logged-in user.
 export function NotificationBell() {
+  const { t } = useI18n();
+  const router = useRouter();
   const { branchId } = useBranch();
   const queryClient = useQueryClient();
   const { data } = useNotifications();
@@ -70,7 +74,7 @@ export function NotificationBell() {
   useEffect(() => {
     if (!branchId) return;
 
-    const socket = io(resolveWsUrl(), { query: { branchId }, withCredentials: true });
+    const socket = io(resolveWsUrl(), { query: { branchId }, withCredentials: true, reconnectionDelayMax: 30_000 });
 
     socket.on("notification.created", () => {
       // The refresh below will list this one; remember its id (via the poll
@@ -115,6 +119,8 @@ export function NotificationBell() {
       notification.entityId
     ) {
       openEntity(notification.entity, notification.entityId);
+    } else if (notification.type.startsWith("stock.")) {
+      router.push("/inventory");
     }
   };
 
@@ -127,8 +133,8 @@ export function NotificationBell() {
             className="relative flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:bg-secondary"
             aria-label={
               unreadCount > 0
-                ? `Notifications, ${unreadCount} unread`
-                : "Notifications"
+                ? t("Notifications, {unreadCount} unread", { unreadCount })
+                : t("Notifications")
             }
           >
             <Bell className="h-[18px] w-[18px]" />
@@ -143,7 +149,7 @@ export function NotificationBell() {
       <DropdownMenuContent align="end" className="w-80 sm:w-96">
         <div className="flex items-center justify-between gap-2 px-1.5 py-1">
           <span className="text-xs font-medium text-muted-foreground">
-            Notifications
+            {t("Notifications")}
           </span>
           <div className="flex items-center gap-1">
             <button
@@ -155,8 +161,8 @@ export function NotificationBell() {
               className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary"
               aria-label={
                 muted
-                  ? "Unmute notification sound on this device"
-                  : "Mute notification sound on this device"
+                  ? t("Unmute notification sound on this device")
+                  : t("Mute notification sound on this device")
               }
               aria-pressed={muted}
             >
@@ -174,7 +180,7 @@ export function NotificationBell() {
                   markAllRead.mutate();
                 }}
                 className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary"
-                aria-label="Mark all notifications read"
+                aria-label={t("Mark all notifications read")}
               >
                 <CheckCheck className="h-3.5 w-3.5" />
               </button>
@@ -186,10 +192,10 @@ export function NotificationBell() {
         {notifications.length === 0 ? (
           <div className="flex flex-col items-center gap-1 px-3 py-8 text-center">
             <p className="text-sm font-medium text-foreground">
-              No notifications yet
+              {t("No notifications yet")}
             </p>
             <p className="text-xs text-muted-foreground">
-              New orders and ready tickets will show up here.
+              {t("New orders and ready tickets will show up here.")}
             </p>
           </div>
         ) : (
@@ -217,7 +223,7 @@ export function NotificationBell() {
                     {notification.title}
                   </span>
                   <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
-                    {timeAgo(notification.createdAt)}
+                    {timeAgo(t, notification.createdAt)}
                   </span>
                 </div>
                 <p className="pl-0 text-xs text-muted-foreground">

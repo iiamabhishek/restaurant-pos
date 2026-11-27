@@ -1,5 +1,6 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
 import { useState } from "react";
 import { CheckIcon, CopyIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 // its masked lastFour is stored/shown from then on), so the copy action
 // here is the user's only chance to grab it.
 export function NewApiKeyDialog({ token, onClose }: { token: string; onClose: () => void }) {
+  const { t } = useI18n();
   const [copied, setCopied] = useState(false);
 
   const onCopy = async () => {
@@ -22,10 +24,9 @@ export function NewApiKeyDialog({ token, onClose }: { token: string; onClose: ()
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>API key created</DialogTitle>
+          <DialogTitle>{t("API key created")}</DialogTitle>
           <DialogDescription>
-            Copy this key now — for security, it will not be shown again. If you lose it, revoke it and create a new
-            one.
+            {t("Copy this key now — for security, it will not be shown again. If you lose it, revoke it and create a new one.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -33,13 +34,13 @@ export function NewApiKeyDialog({ token, onClose }: { token: string; onClose: ()
           <code className="flex-1 overflow-x-auto whitespace-nowrap font-mono text-sm text-foreground">{token}</code>
           <Button type="button" size="icon-sm" variant="outline" onClick={onCopy}>
             {copied ? <CheckIcon className="text-primary" /> : <CopyIcon />}
-            <span className="sr-only">Copy</span>
+            <span className="sr-only">{t("Copy")}</span>
           </Button>
         </div>
 
         <DialogFooter>
           <Button type="button" onClick={onClose}>
-            Done
+            {t("Done")}
           </Button>
         </DialogFooter>
       </DialogContent>

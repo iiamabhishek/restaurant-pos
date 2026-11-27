@@ -37,6 +37,11 @@ const createSchema = z.object({
   origin: z.string().url().max(200).optional(),
 });
 
+const resolveRefundSchema = z.object({
+  outcome: z.enum(['NOT_REFUNDED_AT_PROVIDER', 'SETTLED_OUTSIDE_GATEWAY']),
+  note: z.string().trim().min(3).max(300),
+});
+
 const refundSchema = z.object({
   amount: z.coerce.number().positive(),
   reason: z.string().trim().max(200).optional(),
@@ -96,6 +101,24 @@ export class GatewayPaymentsController {
   @Get('payment-gateways/refunds-to-review')
   refundsToReview(@CurrentUser() u: SessionUser) {
     return this.svc.refundsNeedingReview(u.restaurantId);
+  }
+
+  @Auth('settings.manage')
+  @AuditAction('gateway_refund.resolved', 'GatewayRefund')
+  @Post('payment-gateways/refunds/:id/resolve')
+  @UsePipes(new ZodValidationPipe(resolveRefundSchema))
+  resolveRefund(
+    @CurrentUser() u: SessionUser,
+    @Param('id') id: string,
+    @Body() body: z.infer<typeof resolveRefundSchema>,
+  ) {
+    return this.svc.resolveRefundReview(
+      u.restaurantId,
+      id,
+      u.id,
+      body.outcome,
+      body.note,
+    );
   }
 
   @Auth('refunds.process')

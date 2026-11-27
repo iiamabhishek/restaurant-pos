@@ -3,6 +3,7 @@
 // new tab, so there's no blank/finished tab left for the cashier to notice
 // and close. The OS print dialog still opens exactly as it would for any
 // other page (any printer, or "Save as PDF").
+import type { Translate } from "@/lib/i18n/context";
 import { canPrintOnDevice, printHtmlOnDevice } from "@/lib/device-print";
 import { toast } from "@/lib/toast";
 
@@ -41,20 +42,20 @@ export function billQueryString(adj: BillQuery = {}): string {
 }
 
 /** In the phone app: fetch the page and hand it to Android's print dialog (Save as PDF or any printer). */
-function printPageOnDevice(url: string, name: string) {
+function printPageOnDevice(t: Translate, url: string, name: string) {
   void fetch(url, { credentials: "include" })
     .then((r) => {
-      if (!r.ok) throw new Error(`Could not load the ${name.toLowerCase()} (${r.status})`);
+      if (!r.ok) throw new Error(t("Could not load {document} ({status})", { document: name, status: r.status }));
       return r.text();
     })
-    .then((html) => printHtmlOnDevice(html, name))
-    .catch((e: unknown) => toast.error(e instanceof Error ? e.message : "Could not open the print dialog"));
+    .then((html) => printHtmlOnDevice(t, html, name))
+    .catch((e: unknown) => toast.error(e instanceof Error ? e.message : t("Could not open the print dialog")));
 }
 
 /** Browser print of the bill (open order) or receipt (paid order). Read-only. */
-export function openReceiptPrint(orderId: string, branchId: string, adj: BillQuery = {}) {
+export function openReceiptPrint(t: Translate, orderId: string, branchId: string, adj: BillQuery = {}) {
   if (canPrintOnDevice()) {
-    printPageOnDevice(`/api/v1/orders/${orderId}/receipt?branchId=${branchId}${billQueryString(adj)}`, "Bill");
+    printPageOnDevice(t, `/api/v1/orders/${orderId}/receipt?branchId=${branchId}${billQueryString(adj)}`, t("Bill"));
     return;
   }
   const frame = getPrintFrame();
@@ -72,9 +73,9 @@ export function openReceiptPrint(orderId: string, branchId: string, adj: BillQue
   frame.src = `/api/v1/orders/${orderId}/receipt?branchId=${branchId}${billQueryString(adj)}&t=${Date.now()}`;
 }
 
-export function openKotPrint(orderId: string, branchId: string) {
+export function openKotPrint(t: Translate, orderId: string, branchId: string) {
   if (canPrintOnDevice()) {
-    printPageOnDevice(`/api/v1/orders/${orderId}/kot?branchId=${branchId}`, "Kitchen ticket");
+    printPageOnDevice(t, `/api/v1/orders/${orderId}/kot?branchId=${branchId}`, t("Kitchen ticket"));
     return;
   }
   const frame = getPrintFrame();

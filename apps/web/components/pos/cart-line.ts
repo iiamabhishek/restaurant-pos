@@ -18,11 +18,16 @@ export interface Portion {
   customPrice?: number;
 }
 
-export function portionText(p?: Portion): string {
-  if (!p) return "";
-  if (p.kind === "HALF") return "Half";
-  if (p.kind === "FULL") return "Full";
-  return p.customLabel || "Custom";
+const PORTION_LABELS: Record<PortionKind, string> = { HALF: "Half", FULL: "Full", CUSTOM: "Custom" };
+
+/** Portion names are UI copy. Menu item names and custom portion labels come from staff. */
+export function cartLineName(line: CartLine, t: (key: string) => string = (key) => key): string {
+  const { name, portion } = line;
+  if (!portion) return name;
+  const label = portion.kind === "CUSTOM" && portion.customLabel
+    ? portion.customLabel
+    : t(PORTION_LABELS[portion.kind]);
+  return `${name} (${label})`;
 }
 
 export function cartLineKey(menuItemId: string, modifierIds: string[], portion?: Portion): string {

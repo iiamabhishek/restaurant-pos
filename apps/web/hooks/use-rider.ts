@@ -1,5 +1,7 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
+import { useStaffFormat } from "@/hooks/use-staff-format";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { isNetworkError, outbox } from "@/lib/outbox";
@@ -52,6 +54,8 @@ export function useRiderDeliveries(enabled = true) {
 }
 
 export function useRiderActions() {
+  const { t } = useI18n();
+  const fmt = useStaffFormat();
   const qc = useQueryClient();
   const refresh = () => qc.invalidateQueries({ queryKey: KEY });
   return {
@@ -64,11 +68,12 @@ export function useRiderActions() {
         const path = `/rider/deliveries/${v.id}/status`;
         const body = { status: v.status, reason: v.reason };
         try {
-          return await api.patch<RiderCard>(path, body);
+          return await api.patch<RiderCard>(path, body, { signal: AbortSignal.timeout(15_000) });
         } catch (e) {
           // No connection: keep the update on the phone and send it when the server is back.
           if (!isNetworkError(e)) throw e;
-          outbox.add({ method: "PATCH", path, body, label: `Delivery ${v.status.toLowerCase().replace("_", " ")}` });
+          const saved = outbox.add({ method: "PATCH", path, body, label: t("Delivery {value}", { value: fmt.code(v.status) }) });
+          if (!saved) throw new Error(t("This phone could not save the update (storage full). Free some space and try again."));
           return null;
         }
       },

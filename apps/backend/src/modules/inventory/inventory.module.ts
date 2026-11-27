@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { NotificationsModule } from '../../notifications/notifications.module';
 import { AuditModule } from '../../audit/audit.module';
 import { BranchAccessService } from '../../common/services/branch-access.service';
 import { GoodsReceiptsService } from './goods-receipts.service';
@@ -9,23 +10,52 @@ import { PurchaseRequestsService } from './purchase-requests.service';
 import { StockService } from './stock.service';
 import { SupplierInvoicesService } from './supplier-invoices.service';
 import { SupplierQuotationsService } from './supplier-quotations.service';
+import { ProcurementController } from './procurement.controller';
+import { PriceVarianceService } from './price-variance.service';
+import { PurchaseReturnsService } from './purchase-returns.service';
 import { TransfersController } from './transfers.controller';
 import { TransfersService } from './transfers.service';
+import { ProductionService } from './production.service';
+import { RecipesService } from './recipes.service';
+import { ProductionReportsService } from './production-reports.service';
+import { BranchTimeService } from '../../common/services/branch-time.service';
+import { ManufacturingService } from './manufacturing.service';
+import { StockLocationsService } from './stock-locations.service';
+import { StockJournalController } from './stock-journal.controller';
+import { StockJournalService } from './stock-journal.service';
+import { StockJournalEntriesService } from './stock-journal-entries.service';
+import { WasteEntriesService } from './waste-entries.service';
 import { WasteService } from './waste.service';
 
 @Module({
-  imports: [AuditModule],
-  controllers: [InventoryController, TransfersController],
+  imports: [AuditModule, NotificationsModule],
+  controllers: [
+    InventoryController,
+    TransfersController,
+    StockJournalController,
+    ProcurementController,
+  ],
   providers: [
     InventoryService,
     PurchaseOrdersService,
     GoodsReceiptsService,
     WasteService,
+    ProductionService,
+    StockJournalService,
+    StockJournalEntriesService,
+    StockLocationsService,
+    ManufacturingService,
+    RecipesService,
+    ProductionReportsService,
+    BranchTimeService,
+    WasteEntriesService,
     StockService,
     TransfersService,
     PurchaseRequestsService,
     SupplierQuotationsService,
     SupplierInvoicesService,
+    PurchaseReturnsService,
+    PriceVarianceService,
     BranchAccessService,
   ],
   exports: [InventoryService],

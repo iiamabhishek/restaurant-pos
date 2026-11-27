@@ -3,6 +3,10 @@ packages:
   - "packages/*"
 overrides:
   lodash: ^4.18.1
+  # Command injection / path traversal / prototype pollution advisories; reached only through the shadcn dev CLI.
+  systeminformation: ^5.33.23
+  # ReDoS in Schema.TemplateLiteral (<=3.22.0); reached only through prisma's config loader.
+  effect: ^3.22.1
   postcss: ^8.5.25
   sharp: ^0.35.5
   # Blanket, not scoped to @nestjs/swagger: the other js-yaml consumer in
@@ -11,7 +15,11 @@ overrides:
   # v3 and v4 lines, so collapsing it onto v4 here is safe and closes the
   # v3.15.1 CVE too instead of leaving a second unpatched copy in the graph.
   js-yaml: ^4.3.2
-  hono: ^4.13.5
+  hono: ^4.13.16
+  '@hono/node-server': ^2.1.6
+  node-forge: ^1.4.3
+  glob: ^14.0.2
+  minimatch: ^11.0.1
   fast-uri: ^3.1.9
   qs: ^6.16.1
   multer: ^2.5.0

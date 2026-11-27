@@ -1,7 +1,9 @@
 "use client";
 
+import { useStaffFormat, type StaffFormat } from "@/hooks/use-staff-format";
 import { useState } from "react";
 import { toast } from "@/lib/toast";
+import { BackupScheduleCard } from "@/components/settings/backup-schedule-card";
 import { RestoreBackupDialog } from "@/components/settings/restore-backup-dialog";
 import { SettingsTabs } from "@/components/settings/settings-tabs";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +31,8 @@ import {
   type BackupEntry,
   type BackupStatusValue,
 } from "@/hooks/use-backups";
+import { useI18n } from "@/lib/i18n/context";
+import { LOCALE_TAGS } from "@/lib/i18n/locales";
 import { ApiError } from "@/lib/api";
 
 const STATUS_VARIANT: Record<BackupStatusValue, "outline" | "secondary" | "destructive"> = {
@@ -37,10 +41,10 @@ const STATUS_VARIANT: Record<BackupStatusValue, "outline" | "secondary" | "destr
   FAILED: "destructive",
 };
 
-function formatBytes(bytes: number | null): string {
+function formatBytes(fmt: StaffFormat, bytes: number | null): string {
   if (bytes === null) return "—";
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024) return `${fmt.number((bytes / 1024), 1)} KB`;
+  return `${fmt.number((bytes / (1024 * 1024)), 1)} MB`;
 }
 
 interface ConfigFormState {
@@ -49,8 +53,6 @@ interface ConfigFormState {
   accessKeyId: string;
   secretAccessKey: string;
   region: string;
-  intervalDays: string;
-  retainCount: string;
 }
 
 const EMPTY_CONFIG_FORM: ConfigFormState = {
@@ -59,11 +61,12 @@ const EMPTY_CONFIG_FORM: ConfigFormState = {
   accessKeyId: "",
   secretAccessKey: "",
   region: "auto",
-  intervalDays: "3",
-  retainCount: "2",
 };
 
 export default function BackupPage() {
+  const fmt = useStaffFormat();
+  const { t, locale } = useI18n();
+  const dateLocale = LOCALE_TAGS[locale];
   const { data: status, isLoading: statusLoading } = useBackupStatus();
   const { data: backups, isLoading: backupsLoading } = useBackups();
   const setConfig = useSetBackupConfig();
@@ -83,8 +86,6 @@ export default function BackupPage() {
             accessKeyId: "",
             secretAccessKey: "",
             region: status.region ?? "auto",
-            intervalDays: String(status.intervalDays),
-            retainCount: String(status.retainCount),
           }
         : EMPTY_CONFIG_FORM,
     );
@@ -100,76 +101,75 @@ export default function BackupPage() {
         accessKeyId: configForm.accessKeyId.trim(),
         secretAccessKey: configForm.secretAccessKey.trim(),
         region: configForm.region.trim() || undefined,
-        intervalDays: Number(configForm.intervalDays) || undefined,
-        retainCount: Number(configForm.retainCount) || undefined,
       },
       {
         onSuccess: () => {
-          toast.success("Backup connection saved");
+          toast.success(t("backup.connectedToast"));
           setShowConfigForm(false);
         },
         onError: (err) =>
           toast.error(
-            err instanceof ApiError ? err.message : "Could not connect to that bucket",
+            err instanceof ApiError ? err.message : t("backup.connectError"),
           ),
       },
     );
   };
 
   const onDisconnect = () => {
-    if (!confirm("Disconnect S3 backups? Scheduled backups will stop until reconnected.")) {
+    if (!confirm(t("backup.disconnectConfirm"))) {
       return;
     }
     clearConfig.mutate(undefined, {
-      onSuccess: () => toast.success("Backup connection removed"),
+      onSuccess: () => toast.success(t("backup.disconnectedToast")),
       onError: (err) =>
-        toast.error(err instanceof ApiError ? err.message : "Could not disconnect"),
+        toast.error(err instanceof ApiError ? err.message : t("backup.disconnectError")),
     });
   };
 
   const onTrigger = () => {
     triggerBackup.mutate(undefined, {
-      onSuccess: () => toast.success("Backup started"),
+      onSuccess: () => toast.success(t("backup.startedToast")),
       onError: (err) =>
-        toast.error(err instanceof ApiError ? err.message : "Could not start backup"),
+        toast.error(err instanceof ApiError ? err.message : t("backup.startError")),
     });
   };
+
+  const localDownload = (
+    <Card className="flex flex-col gap-3 p-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 className="text-[18px] font-medium text-foreground">{t("backup.downloadTitle")}</h2>
+          <p className="text-sm text-muted-foreground">
+            {t("backup.downloadDescription")}
+          </p>
+        </div>
+        <Button nativeButton={false} render={<a href={LOCAL_BACKUP_URL} download />}>{t("backup.downloadLocal")}</Button>
+      </div>
+    </Card>
+  );
 
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Settings</h1>
-        <p className="text-sm text-muted-foreground">Restaurant, branch, and staff configuration</p>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("nav.settings")}</h1>
+        <p className="text-sm text-muted-foreground">{t("backup.pageDescription")}</p>
       </div>
 
       <SettingsTabs />
 
-      <Card className="flex flex-col gap-3 p-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h2 className="text-[18px] font-medium text-foreground">Download a backup</h2>
-            <p className="text-sm text-muted-foreground">
-              Save a complete copy of the database and uploaded files (menu photos, logos) to
-              this computer as a .zip. No cloud bucket needed — keep it on a USB drive or
-              private cloud folder. Contains customer and sales data, so store it safely.
-            </p>
-          </div>
-          <Button render={<a href={LOCAL_BACKUP_URL} download />}>Download backup now</Button>
-        </div>
-      </Card>
+      {status?.configured ? <BackupScheduleCard status={status} /> : localDownload}
 
       <Card className="flex flex-col gap-4 p-6">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-[18px] font-medium text-foreground">Backup &amp; restore</h2>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-[min(100%,15rem)] flex-1">
+            <h2 className="text-[18px] font-medium text-foreground">{t("backup.storageTitle")}</h2>
             <p className="text-sm text-muted-foreground">
-              Full database and uploaded-file backups to any S3-compatible bucket. This is
-              instance-wide — it covers every restaurant hosted on this server, not just yours.
+              {t("backup.storageDescription")}
             </p>
           </div>
           {status ? (
             <Badge variant={status.configured ? "secondary" : "outline"}>
-              {status.configured ? "Configured" : "Not configured"}
+              {t(status.configured ? "backup.connected" : "backup.disconnected")}
             </Badge>
           ) : null}
         </div>
@@ -179,12 +179,11 @@ export default function BackupPage() {
         ) : !status?.configured || showConfigForm ? (
           <form onSubmit={onSaveConfig} className="flex flex-col gap-4">
             <p className="text-sm text-muted-foreground">
-              Connect any S3-compatible bucket (AWS S3, MinIO, RustFS, R2, …) to enable
-              automatic backups. Runs on its own schedule from here on.
+              {t("backup.connectHelp")}
             </p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               <div className="flex flex-col gap-2">
-                <Label htmlFor="b-endpoint">Endpoint URL</Label>
+                <Label htmlFor="b-endpoint">{t("backup.endpoint")}</Label>
                 <Input
                   id="b-endpoint"
                   placeholder="https://s3.example.com"
@@ -194,7 +193,7 @@ export default function BackupPage() {
                 />
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="b-bucket">Bucket</Label>
+                <Label htmlFor="b-bucket">{t("backup.bucket")}</Label>
                 <Input
                   id="b-bucket"
                   value={configForm.bucket}
@@ -203,7 +202,7 @@ export default function BackupPage() {
                 />
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="b-key">Access key ID</Label>
+                <Label htmlFor="b-key">{t("backup.key")}</Label>
                 <Input
                   id="b-key"
                   value={configForm.accessKeyId}
@@ -212,7 +211,7 @@ export default function BackupPage() {
                 />
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="b-secret">Secret access key</Label>
+                <Label htmlFor="b-secret">{t("backup.secret")}</Label>
                 <Input
                   id="b-secret"
                   type="password"
@@ -224,46 +223,18 @@ export default function BackupPage() {
                 />
               </div>
               <div className="flex flex-col gap-2">
-                <Label htmlFor="b-region">Region</Label>
+                <Label htmlFor="b-region">{t("backup.region")}</Label>
                 <Input
                   id="b-region"
-                  placeholder="auto"
+                  placeholder={t("auto")}
                   value={configForm.region}
                   onChange={(e) => setConfigForm((f) => ({ ...f, region: e.target.value }))}
                 />
               </div>
-              <div className="flex gap-4">
-                <div className="flex flex-1 flex-col gap-2">
-                  <Label htmlFor="b-interval">Backup every (days)</Label>
-                  <Input
-                    id="b-interval"
-                    type="number"
-                    min={1}
-                    max={30}
-                    value={configForm.intervalDays}
-                    onChange={(e) =>
-                      setConfigForm((f) => ({ ...f, intervalDays: e.target.value }))
-                    }
-                  />
-                </div>
-                <div className="flex flex-1 flex-col gap-2">
-                  <Label htmlFor="b-retain">Keep last (backups)</Label>
-                  <Input
-                    id="b-retain"
-                    type="number"
-                    min={1}
-                    max={10}
-                    value={configForm.retainCount}
-                    onChange={(e) =>
-                      setConfigForm((f) => ({ ...f, retainCount: e.target.value }))
-                    }
-                  />
-                </div>
-              </div>
             </div>
             <div className="flex items-center gap-2">
               <Button type="submit" disabled={setConfig.isPending}>
-                {setConfig.isPending ? "Testing connection…" : "Connect & save"}
+                {t(setConfig.isPending ? "backup.testing" : "backup.connect")}
               </Button>
               {status?.configured ? (
                 <Button
@@ -271,7 +242,7 @@ export default function BackupPage() {
                   variant="ghost"
                   onClick={() => setShowConfigForm(false)}
                 >
-                  Cancel
+                  {t("common.cancel")}
                 </Button>
               ) : null}
             </div>
@@ -280,20 +251,18 @@ export default function BackupPage() {
           <div className="flex flex-col gap-4">
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-3 text-sm">
               <div>
-                <p className="text-foreground">
+                <p className="break-all text-foreground">
                   {status.bucket}{" "}
-                  <span className="text-muted-foreground">at {status.endpoint}</span>
+                  <span className="text-muted-foreground">· {status.endpoint}</span>
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Key {status.accessKeyIdMasked} ·{" "}
-                  {status.source === "environment"
-                    ? "configured via environment variables"
-                    : "configured here"}
+                  {t("backup.maskedKey", { key: status.accessKeyIdMasked ?? "—" })} ·{" "}
+                  {t(status.source === "environment" ? "backup.envSource" : "backup.dbSource")}
                 </p>
               </div>
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" onClick={openConfigForm}>
-                  Change
+                  {t("backup.change")}
                 </Button>
                 {status.source === "database" ? (
                   <Button
@@ -302,44 +271,30 @@ export default function BackupPage() {
                     disabled={clearConfig.isPending}
                     onClick={onDisconnect}
                   >
-                    Disconnect
+                    {t("backup.disconnect")}
                   </Button>
                 ) : null}
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-              <Stat label="Runs every" value={`${status.intervalDays} days`} />
-              <Stat label="Keeps" value={`${status.retainCount} backups`} />
-              <Stat
-                label="Last backup"
-                value={
-                  status.lastBackup
-                    ? new Date(status.lastBackup.createdAt).toLocaleString()
-                    : "Never"
-                }
-              />
-              <Stat
-                label="Next scheduled"
-                value={
-                  status.nextScheduledAt
-                    ? new Date(status.nextScheduledAt).toLocaleString()
-                    : "—"
-                }
-              />
-            </div>
+            <Stat
+              label={t("backup.last")}
+              value={status.lastBackup ? new Date(status.lastBackup.createdAt).toLocaleString(dateLocale) : t("backup.never")}
+            />
 
             <div>
               <Button onClick={onTrigger} disabled={triggerBackup.isPending}>
-                {triggerBackup.isPending ? "Starting…" : "Back up now"}
+                {t(triggerBackup.isPending ? "backup.starting" : "backup.run")}
               </Button>
             </div>
           </div>
         )}
       </Card>
 
+      {status?.configured && localDownload}
+
       <Card className="flex flex-col gap-4 p-6">
-        <h2 className="text-[18px] font-medium text-foreground">History</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{t("backup.history")}</h2>
 
         {backupsLoading ? (
           <div className="flex flex-col gap-2">
@@ -351,23 +306,23 @@ export default function BackupPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Started</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Size</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead>{t("backup.started")}</TableHead>
+                <TableHead>{t("backup.status")}</TableHead>
+                <TableHead>{t("backup.size")}</TableHead>
+                <TableHead className="text-right">{t("backup.actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {backups.map((b) => (
                 <TableRow key={b.id}>
                   <TableCell className="font-medium text-foreground">
-                    {new Date(b.createdAt).toLocaleString()}
+                    {new Date(b.createdAt).toLocaleString(dateLocale)}
                     <div className="text-xs font-normal text-muted-foreground">
-                      {b.triggeredById ? "Manual" : "Scheduled"}
+                      {t(b.triggeredById ? "backup.manual" : "backup.scheduled")}
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant={STATUS_VARIANT[b.status]}>{b.status}</Badge>
+                    <Badge variant={STATUS_VARIANT[b.status]}>{t(`backup.status.${b.status}`)}</Badge>
                     {b.status === "FAILED" && b.failureReason ? (
                       <div className="mt-1 max-w-xs truncate text-xs text-destructive" title={b.failureReason}>
                         {b.failureReason}
@@ -375,7 +330,7 @@ export default function BackupPage() {
                     ) : null}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
-                    {formatBytes(b.sizeBytes)}
+                    {formatBytes(fmt, b.sizeBytes)}
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1">
@@ -383,13 +338,13 @@ export default function BackupPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          render={<a href={backupDownloadUrl(b.id)} />}
+                          nativeButton={false} render={<a href={backupDownloadUrl(b.id)} />}
                         >
-                          Download
+                          {t("backup.download")}
                         </Button>
                       ) : (
                         <Button size="sm" variant="ghost" disabled>
-                          Download
+                          {t("backup.download")}
                         </Button>
                       )}
                       <Button
@@ -398,7 +353,7 @@ export default function BackupPage() {
                         disabled={b.status !== "VERIFIED"}
                         onClick={() => setRestoreTarget(b)}
                       >
-                        Restore
+                        {t("backup.restore")}
                       </Button>
                     </div>
                   </TableCell>
@@ -408,9 +363,9 @@ export default function BackupPage() {
           </Table>
         ) : (
           <div className="flex flex-col items-center gap-2 py-16 text-center">
-            <p className="text-sm font-medium text-foreground">No backups yet</p>
+            <p className="text-sm font-medium text-foreground">{t("backup.empty")}</p>
             <p className="text-sm text-muted-foreground">
-              Connect a bucket above and back up now to get started.
+              {t(status?.configured ? "backup.emptyConnected" : "backup.emptyNew")}
             </p>
           </div>
         )}

@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat, type StaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Paperclip, X } from "lucide-react";
 import { useRef } from "react";
@@ -14,9 +16,11 @@ export interface DocFile {
   size: number;
 }
 
-const kb = (n: number) => (n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+const kb = (fmt: StaffFormat, n: number) => (n >= 1_048_576 ? `${fmt.number((n / 1_048_576), 1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
 export function DocumentFiles({ branchId, docId, files }: { branchId: string | null; docId: string; files: DocFile[] }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const qc = useQueryClient();
   const ref = useRef<HTMLInputElement>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ["ops"] });
@@ -25,9 +29,9 @@ export function DocumentFiles({ branchId, docId, files }: { branchId: string | n
     mutationFn: (f: File) => api.upload(`${base}?branchId=${branchId}`, f),
     onSuccess: () => {
       refresh();
-      toast.success("File attached");
+      toast.success(t("File attached"));
     },
-    onError: (e) => toast.error(e instanceof ApiError ? e.message : "Upload failed"),
+    onError: (e) => toast.error(e instanceof ApiError ? e.message : t("Upload failed")),
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.delete(`${base}/${id}?branchId=${branchId}`),
@@ -37,27 +41,27 @@ export function DocumentFiles({ branchId, docId, files }: { branchId: string | n
   return (
     <div className="flex flex-col gap-2 border-t border-border pt-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm font-medium text-foreground">Attachments</p>
+        <p className="text-sm font-medium text-foreground">{t("Attachments")}</p>
         <input
           ref={ref}
           type="file"
           className="sr-only"
-          aria-label="Attach a file"
+          aria-label={t("Attach a file")}
           onChange={(e) => {
             const f = e.target.files?.[0];
             if (f) {
-              if (f.size > 5 * 1024 * 1024) toast.error("Files can be at most 5 MB");
+              if (f.size > 5 * 1024 * 1024) toast.error(t("Files can be at most 5 MB"));
               else upload.mutate(f);
             }
             e.target.value = "";
           }}
         />
         <Button size="sm" variant="outline" disabled={upload.isPending} onClick={() => ref.current?.click()}>
-          <Paperclip className="mr-1.5 h-3.5 w-3.5" /> {upload.isPending ? "Uploading…" : "Attach file"}
+          <Paperclip className="mr-1.5 h-3.5 w-3.5" /> {upload.isPending ? t("Uploading…") : t("Attach file")}
         </Button>
       </div>
       {files.length === 0 ? (
-        <p className="text-xs text-muted-foreground">PDF, image, text, Word or Excel · up to 5 MB each, 10 per document.</p>
+        <p className="text-xs text-muted-foreground">{t("PDF, image, text, Word or Excel · up to 5 MB each, 10 per document.")}</p>
       ) : (
         <ul className="flex flex-col gap-1">
           {files.map((f) => (
@@ -70,8 +74,8 @@ export function DocumentFiles({ branchId, docId, files }: { branchId: string | n
                 {f.fileName}
               </a>
               <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-                {kb(f.size)}
-                <button type="button" aria-label={`Remove ${f.fileName}`} onClick={() => remove.mutate(f.id)} className="hover:text-destructive">
+                {kb(fmt, f.size)}
+                <button type="button" aria-label={t("Remove {fileName}", { fileName: f.fileName })} onClick={() => remove.mutate(f.id)} className="hover:text-destructive">
                   <X className="h-3.5 w-3.5" />
                 </button>
               </span>

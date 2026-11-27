@@ -1,6 +1,10 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
+import { Download, Lock } from "lucide-react";
 import { useState } from "react";
+import { hasPermission, useCurrentUser } from "@/hooks/use-auth";
 import { SettingsTabs } from "@/components/settings/settings-tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,12 +37,19 @@ interface Filters {
 }
 
 export default function AuditLogPage() {
+  const { t } = useI18n();
   const [filters, setFilters] = useState<Filters>({ page: 1 });
   const { data, isLoading, isFetching } = useAuditLog({
     ...filters,
     pageSize: PAGE_SIZE,
   });
   const { data: entities } = useAuditLogEntities();
+  const { data: me } = useCurrentUser();
+  const canExport = hasPermission(me?.user, "data.export");
+  const exportQs = new URLSearchParams();
+  if (filters.entity) exportQs.set("entity", filters.entity);
+  if (filters.from) exportQs.set("from", filters.from);
+  if (filters.to) exportQs.set("to", filters.to);
 
   const setEntityFilter = (entity: string | undefined) =>
     setFilters((prev) => ({ ...prev, entity, page: 1 }));
@@ -54,8 +65,8 @@ export default function AuditLogPage() {
   return (
     <div className="flex flex-col gap-6">
       <div>
-        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">Settings</h1>
-        <p className="text-sm text-muted-foreground">Restaurant, branch, and staff configuration</p>
+        <h1 className="text-[32px] font-semibold tracking-tight text-foreground">{t("Settings")}</h1>
+        <p className="text-sm text-muted-foreground">{t("Restaurant, branch, and staff configuration")}</p>
       </div>
 
       <SettingsTabs />
@@ -63,15 +74,31 @@ export default function AuditLogPage() {
       <Card className="flex flex-col gap-5 p-6">
         <div className="flex flex-col gap-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-[18px] font-medium text-foreground">Audit log</h2>
+            <h2 className="text-[18px] font-medium text-foreground">{t("Audit log")}</h2>
             {data ? (
-              <p className="text-sm text-muted-foreground">{data.total} entries</p>
+              <p className="text-sm text-muted-foreground">{t("{total} entries", { total: data.total })}</p>
             ) : null}
           </div>
+          <p className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Lock className="h-3.5 w-3.5" aria-hidden /> {t("Entries are permanent: nobody, including admins, can edit or delete them.")}
+          </p>
+          {canExport && (
+            <div className="flex flex-wrap gap-2">
+              {(["xlsx", "pdf", "csv"] as const).map((f) => (
+                <a
+                  key={f}
+                  href={`/api/v1/audit-logs/export?${exportQs.toString()}${exportQs.size ? "&" : ""}format=${f}`}
+                  className="inline-flex h-8 items-center rounded-lg border border-border px-3 text-sm hover:bg-secondary"
+                >
+                  <Download className="mr-2 h-4 w-4" /> {f === "xlsx" ? t("Excel") : f.toUpperCase()}
+                </a>
+              ))}
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-2">
             <EntityChip
-              label="All"
+              label={t("All")}
               active={!filters.entity}
               onClick={() => setEntityFilter(undefined)}
             />
@@ -87,7 +114,7 @@ export default function AuditLogPage() {
 
           <div className="flex flex-wrap items-end gap-4">
             <div className="flex flex-col gap-2">
-              <Label htmlFor="audit-from">From</Label>
+              <Label htmlFor="audit-from">{t("From")}</Label>
               <Input
                 id="audit-from"
                 type="date"
@@ -97,7 +124,7 @@ export default function AuditLogPage() {
               />
             </div>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="audit-to">To</Label>
+              <Label htmlFor="audit-to">{t("To")}</Label>
               <Input
                 id="audit-to"
                 type="date"
@@ -108,7 +135,7 @@ export default function AuditLogPage() {
             </div>
             {filters.from || filters.to ? (
               <Button type="button" variant="ghost" size="sm" onClick={clearDates}>
-                Clear dates
+                {t("Clear dates")}
               </Button>
             ) : null}
           </div>
@@ -125,11 +152,11 @@ export default function AuditLogPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Actor</TableHead>
-                  <TableHead>Action</TableHead>
-                  <TableHead>Entity</TableHead>
-                  <TableHead>Timestamp</TableHead>
-                  <TableHead className="text-right">Details</TableHead>
+                  <TableHead>{t("Actor")}</TableHead>
+                  <TableHead>{t("Action")}</TableHead>
+                  <TableHead>{t("Entity")}</TableHead>
+                  <TableHead>{t("Timestamp")}</TableHead>
+                  <TableHead className="text-right">{t("Details")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -140,9 +167,7 @@ export default function AuditLogPage() {
             </Table>
 
             <div className="flex items-center justify-between pt-2">
-              <p className="text-sm text-muted-foreground">
-                Page {data.page} of {data.totalPages}
-              </p>
+              <p className="text-sm text-muted-foreground">{t("Page {page} of {totalPages}", { page: data.page, totalPages: data.totalPages })}</p>
               <div className="flex gap-2">
                 <Button
                   variant="outline"
@@ -150,7 +175,7 @@ export default function AuditLogPage() {
                   disabled={data.page <= 1 || isFetching}
                   onClick={() => goToPage(data.page - 1)}
                 >
-                  Previous
+                  {t("Previous")}
                 </Button>
                 <Button
                   variant="outline"
@@ -158,16 +183,16 @@ export default function AuditLogPage() {
                   disabled={data.page >= data.totalPages || isFetching}
                   onClick={() => goToPage(data.page + 1)}
                 >
-                  Next
+                  {t("Next")}
                 </Button>
               </div>
             </div>
           </>
         ) : (
           <div className="flex flex-col items-center gap-2 py-16 text-center">
-            <p className="text-sm font-medium text-foreground">No audit log entries yet</p>
+            <p className="text-sm font-medium text-foreground">{t("No audit log entries yet")}</p>
             <p className="text-sm text-muted-foreground">
-              Actions like staff changes, refunds, and price edits will show up here.
+              {t("Actions like staff changes, refunds, and price edits will show up here.")}
             </p>
           </div>
         )}
@@ -207,6 +232,8 @@ function EntityChip({
 // "reset" anything — each row is keyed by entry.id, so a fresh mount already
 // starts collapsed).
 function AuditLogRow({ entry }: { entry: AuditLogEntry }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const hasMetadata = entry.metadata !== null && entry.metadata !== undefined;
 
@@ -214,7 +241,7 @@ function AuditLogRow({ entry }: { entry: AuditLogEntry }) {
     <>
       <TableRow>
         <TableCell className="font-medium text-foreground">
-          {entry.user?.name ?? "System"}
+          {entry.user?.name ?? t("System")}
         </TableCell>
         <TableCell>
           <Badge variant="secondary" className="font-normal">
@@ -228,12 +255,12 @@ function AuditLogRow({ entry }: { entry: AuditLogEntry }) {
           ) : null}
         </TableCell>
         <TableCell className="text-muted-foreground">
-          {new Date(entry.createdAt).toLocaleString()}
+          {new Date(entry.createdAt).toLocaleString(fmt.localeTag)}
         </TableCell>
         <TableCell className="text-right">
           {hasMetadata ? (
             <Button variant="ghost" size="sm" onClick={() => setExpanded((v) => !v)}>
-              {expanded ? "Hide" : "View"}
+              {expanded ? t("Hide") : t("View")}
             </Button>
           ) : (
             <span className="text-xs text-muted-foreground">—</span>

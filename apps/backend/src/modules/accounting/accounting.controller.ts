@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -6,11 +7,15 @@ import {
   Param,
   Post,
   Query,
+  Res,
   UsePipes,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags } from '@nestjs/swagger';
 import {
   cashClosingSchema,
+  permissionSatisfied,
+  expenseDecisionSchema,
   expenseSchema,
   type CashClosingDto,
   type ExpenseDto,
@@ -21,6 +26,7 @@ import { AuditAction } from '../../audit/audit-action';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { BranchAccessService } from '../../common/services/branch-access.service';
+import { EXPORT_TYPES, renderReport } from '../reports/export';
 import { AccountingService } from './accounting.service';
 
 @ApiTags('accounting')
@@ -47,7 +53,8 @@ export class AccountingController {
     return this.accounting.listExpenses(branchId, from, to);
   }
 
-  @Auth('accounting.manage')
+  // Anyone who may submit an expense. Approvers' expenses are recorded as approved, everyone else's wait.
+  @Auth('expenses.submit')
   @AuditAction('expense.created', 'Expense')
   @Post('expenses')
   @UsePipes(new ZodValidationPipe(expenseSchema))
@@ -57,7 +64,86 @@ export class AccountingController {
     @Body() body: ExpenseDto,
   ) {
     await this.access(u, branchId);
-    return this.accounting.createExpense(branchId, u.id, body);
+    return this.accounting.createExpense(
+      branchId,
+      u.id,
+      body,
+      permissionSatisfied(u.permissions, 'expenses.approve'),
+    );
+  }
+
+  @Auth('expenses.submit')
+  @Get('expenses/mine')
+  async myExpenses(
+    @CurrentUser() u: SessionUser,
+    @Query('branchId') branchId: string,
+  ) {
+    await this.access(u, branchId);
+    return this.accounting.myExpenses(branchId, u.id);
+  }
+
+  @Auth('expenses.approve')
+  @Get('expenses/pending')
+  async pendingExpenses(
+    @CurrentUser() u: SessionUser,
+    @Query('branchId') branchId: string,
+  ) {
+    await this.access(u, branchId);
+    return this.accounting.pendingExpenses(branchId);
+  }
+
+  @Auth('expenses.approve')
+  @AuditAction('expense.approved', 'Expense')
+  @Post('expenses/:id/approve')
+  async approveExpense(
+    @CurrentUser() u: SessionUser,
+    @Query('branchId') branchId: string,
+    @Param('id') id: string,
+    @Body() body?: unknown,
+  ) {
+    await this.access(u, branchId);
+    const { note } = expenseDecisionSchema.parse(body ?? {});
+    return this.accounting.decideExpense(branchId, id, u.id, true, note);
+  }
+
+  @Auth('expenses.approve')
+  @AuditAction('expense.rejected', 'Expense')
+  @Post('expenses/:id/reject')
+  async rejectExpense(
+    @CurrentUser() u: SessionUser,
+    @Query('branchId') branchId: string,
+    @Param('id') id: string,
+    @Body() body?: unknown,
+  ) {
+    await this.access(u, branchId);
+    const { note } = expenseDecisionSchema.parse(body ?? {});
+    return this.accounting.decideExpense(branchId, id, u.id, false, note);
+  }
+
+  // Journal for an accountant: CSV or Excel, balanced vouchers. Needs the export permission as well.
+  @Auth('accounting.manage', 'data.export')
+  @AuditAction('accounting.exported', 'Journal')
+  @Get('export/journal')
+  async exportJournal(
+    @CurrentUser() u: SessionUser,
+    @Query('branchId') branchId: string,
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('format') format = 'csv',
+    @Res() res: Response,
+  ) {
+    if (format !== 'csv' && format !== 'xlsx')
+      throw new BadRequestException('format must be csv or xlsx');
+    await this.access(u, branchId);
+    const j = await this.accounting.journalExport(branchId, from, to);
+    const body = await renderReport(j, format, `${from} to ${to}`);
+    const t = EXPORT_TYPES[format];
+    res.setHeader('Content-Type', t.mime);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="journal_${from}_${to}.${t.ext}"`,
+    );
+    res.send(body);
   }
 
   @Auth('accounting.manage')

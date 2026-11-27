@@ -100,4 +100,28 @@ export class GiftCardsService {
 
     return { giftCardId: card.id, amountApplied };
   }
+
+  /**
+   * Restores value to a card when a refund is issued back to that card.
+   * Counterpart to `debit()`: an atomic increment for the same reason (two
+   * concurrent refunds must not read one stale balance and lose a credit).
+   * The caller runs it inside the refund's own transaction so the card and
+   * the books are committed together.
+   */
+  async credit(
+    tx: Prisma.TransactionClient,
+    branchId: string,
+    giftCardId: string,
+    amount: number,
+  ): Promise<void> {
+    const value = round2(amount);
+    if (value <= 0) return;
+    const result = await tx.giftCard.updateMany({
+      where: { id: giftCardId, branchId },
+      data: { balance: { increment: value } },
+    });
+    if (result.count === 0) {
+      throw new BadRequestException('Gift card not found for this branch');
+    }
+  }
 }

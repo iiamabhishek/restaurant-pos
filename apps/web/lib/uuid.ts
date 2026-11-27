@@ -1,7 +1,5 @@
-// RFC 4122 v4 id for the kiosk's idempotency key. crypto.randomUUID() only
-// exists in secure contexts (HTTPS / localhost) and the kiosk may be opened
-// over plain HTTP on the restaurant LAN, so fall back to getRandomValues(),
-// which is available everywhere.
+// Table QR and kiosk orders also run over plain HTTP on the restaurant LAN,
+// where browsers provide getRandomValues() but omit randomUUID().
 export function uuid(): string {
   const c = globalThis.crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID();

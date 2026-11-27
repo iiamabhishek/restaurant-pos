@@ -1,4 +1,9 @@
-import { decryptSecret, encryptSecret } from './secret-box';
+import {
+  decryptSecret,
+  encryptSecret,
+  openStored,
+  sealStored,
+} from './secret-box';
 
 describe('secret-box', () => {
   const OLD = { ...process.env };
@@ -50,5 +55,15 @@ describe('secret-box', () => {
     expect(() => encryptSecret('x', 'c')).toThrow(/INTEGRATION_SECRET_KEY/);
     process.env.JWT_SECRET = 'short';
     expect(() => encryptSecret('x', 'c')).toThrow(/INTEGRATION_SECRET_KEY/);
+  });
+
+  it('openStored reads legacy plaintext and sealed values alike', () => {
+    expect(openStored('plain-legacy-key', 'ctx')).toBe('plain-legacy-key');
+    const sealed = sealStored('s3-secret', 'ctx');
+    expect(sealed).not.toContain('s3-secret');
+    expect(openStored(sealed, 'ctx')).toBe('s3-secret');
+    expect(openStored('v1.not.really.sealed', 'ctx')).toBe(
+      'v1.not.really.sealed',
+    );
   });
 });

@@ -5,9 +5,8 @@ import type { Locale } from "@/lib/i18n/locales";
 import { cn } from "@/lib/utils";
 import { TOUCH } from "./kiosk-ui";
 
-// Spanish-first; English is the optional second language. (French and other
-// dashboard languages exist but have no kiosk copy, so they are not offered.)
-export const LOCALES_SHOWN: Locale[] = ["es", "en"];
+// Offer languages with a complete kiosk dictionary, with Spanish first.
+export const LOCALES_SHOWN: Locale[] = ["es", "en", "pt"];
 
 export function KioskHeader({
   name,

@@ -1,5 +1,7 @@
 "use client";
 
+import { useStaffFormat } from "@/hooks/use-staff-format";
+import { useI18n } from "@/lib/i18n/context";
 import { ArrowDown, ArrowUp, Eye, EyeOff, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -23,6 +25,8 @@ export function CustomizePanel({
   onClose: () => void;
   saving: boolean;
 }) {
+  const fmt = useStaffFormat();
+  const { t } = useI18n();
   const move = (key: "topOrder" | "cardOrder", id: string, by: -1 | 1) => {
     const list = [...prefs[key]];
     const i = list.indexOf(id);
@@ -46,8 +50,8 @@ export function CustomizePanel({
           return (
             <li key={id} className="flex items-center justify-between gap-2 px-3 py-1.5">
               <span className={hidden ? "text-sm text-muted-foreground line-through" : "text-sm text-foreground"}>
-                {WIDGET_LABELS[id] ?? id}
-                {hidden && <span className="ml-2 text-xs no-underline">(hidden)</span>}
+                {fmt.label(WIDGET_LABELS[id] ?? id)}
+                {hidden && <span className="ml-2 text-xs no-underline">{t("(hidden)")}</span>}
               </span>
               <span className="flex items-center gap-0.5">
                 <Button
@@ -55,7 +59,7 @@ export function CustomizePanel({
                   size="icon"
                   className="h-8 w-8"
                   disabled={i === 0}
-                  aria-label={`Move ${WIDGET_LABELS[id]} up`}
+                  aria-label={t("Move {value} up", { value: fmt.label(WIDGET_LABELS[id]) })}
                   onClick={() => move(key, id, -1)}
                 >
                   <ArrowUp className="h-4 w-4" />
@@ -65,7 +69,7 @@ export function CustomizePanel({
                   size="icon"
                   className="h-8 w-8"
                   disabled={i === all.length - 1}
-                  aria-label={`Move ${WIDGET_LABELS[id]} down`}
+                  aria-label={t("Move {value} down", { value: fmt.label(WIDGET_LABELS[id]) })}
                   onClick={() => move(key, id, 1)}
                 >
                   <ArrowDown className="h-4 w-4" />
@@ -75,7 +79,7 @@ export function CustomizePanel({
                   size="icon"
                   className="h-8 w-8"
                   aria-pressed={hidden}
-                  aria-label={hidden ? `Show ${WIDGET_LABELS[id]}` : `Hide ${WIDGET_LABELS[id]}`}
+                  aria-label={hidden ? t("Show {value}", { value: fmt.label(WIDGET_LABELS[id]) }) : t("Hide {value}", { value: fmt.label(WIDGET_LABELS[id]) })}
                   onClick={() => toggle(id)}
                 >
                   {hidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
@@ -89,38 +93,36 @@ export function CustomizePanel({
   );
 
   return (
-    <Card className="flex flex-col gap-4 p-5" role="region" aria-label="Customize dashboard">
+    <Card className="flex flex-col gap-4 p-5" role="region" aria-label={t("Customize dashboard")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-[18px] font-medium text-foreground">Customize your dashboard</h2>
+        <h2 className="text-[18px] font-medium text-foreground">{t("Customize your dashboard")}</h2>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => onChange(DEFAULT_DASHBOARD_PREFS)}>
             <RotateCcw className="h-3.5 w-3.5" />
-            Restore default
+            {t("Restore default")}
           </Button>
           <Button size="sm" onClick={onClose}>
-            Done
+            {t("Done")}
           </Button>
         </div>
       </div>
       <p className="text-xs text-muted-foreground">
-        This only changes what you see and in what order. The numbers always come from your records.
-        {saving ? " Saving…" : " Saved automatically for your account."}
+        {t("This only changes what you see and in what order. The numbers always come from your records.")}
+        {saving ? t(" Saving…") : t(" Saved automatically for your account.")}
       </p>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {group("Main sections", "topOrder")}
-        {group("Cards", "cardOrder")}
+        {group(t("Main sections"), "topOrder")}
+        {group(t("Cards"), "cardOrder")}
       </div>
       <label className="flex flex-wrap items-center gap-2 text-sm text-foreground">
-        Chart period
+        {t("Chart period")}
         <select
           value={prefs.trendDays}
           onChange={(e) => onChange({ ...prefs, trendDays: Number(e.target.value) })}
           className="h-9 rounded-lg border border-border bg-background px-2 text-sm"
         >
           {TREND_DAY_OPTIONS.map((d) => (
-            <option key={d} value={d}>
-              Last {d} days
-            </option>
+            <option key={d} value={d}>{t("Last {d} days", { d })}</option>
           ))}
         </select>
       </label>

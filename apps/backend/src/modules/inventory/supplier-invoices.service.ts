@@ -107,7 +107,9 @@ export class SupplierInvoicesService {
 
       const currentPaid = Number(invoice.amountPaid);
       const total = Number(invoice.totalAmount);
-      const remaining = round2(total - currentPaid);
+      // Credit from purchase returns settles part of the invoice just like a payment does.
+      const credited = Number(invoice.creditedAmount);
+      const remaining = round2(total - currentPaid - credited);
       if (dto.amount > remaining) {
         throw new BadRequestException(
           `Payment of ${dto.amount} exceeds the remaining balance of ${remaining}`,
@@ -115,8 +117,9 @@ export class SupplierInvoicesService {
       }
 
       const newPaid = round2(currentPaid + dto.amount);
+      const settled = round2(newPaid + credited);
       const newStatus =
-        newPaid >= total ? 'PAID' : newPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
+        settled >= total ? 'PAID' : settled > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
 
       const payment = await tx.supplierPayment.create({
         data: {
@@ -140,9 +143,9 @@ export class SupplierInvoicesService {
 
   async cancelInvoice(branchId: string, id: string) {
     const invoice = await this.getInvoice(branchId, id);
-    if (Number(invoice.amountPaid) > 0) {
+    if (Number(invoice.amountPaid) > 0 || Number(invoice.creditedAmount) > 0) {
       throw new BadRequestException(
-        'Cannot cancel an invoice that already has payments recorded',
+        'Cannot cancel an invoice that already has payments or return credit recorded',
       );
     }
     return this.prisma.supplierInvoice.update({

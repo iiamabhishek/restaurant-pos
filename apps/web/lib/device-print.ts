@@ -2,6 +2,7 @@
 // thermal printer, or Android's print dialog (Save as PDF and every installed
 // printer). In a normal browser everything here is off and the existing
 // browser / server-printer paths are used.
+import type { Translate } from "@/lib/i18n/context";
 import { isNativeApp, plugin } from "@/lib/native";
 
 export interface BtPrinter {
@@ -45,8 +46,8 @@ export function saveBtPrinter(p: BtPrinter | null) {
 }
 
 export class PrinterNotChosen extends Error {
-  constructor() {
-    super("No Bluetooth printer chosen. Pair the printer in the phone's Bluetooth settings, then choose it here.");
+  constructor(t: Translate) {
+    super(t("No Bluetooth printer chosen. Pair the printer in the phone's Bluetooth settings, then choose it here."));
   }
 }
 
@@ -67,21 +68,21 @@ export function chooseBtPrinter(): Promise<BtPrinter | null> {
 }
 
 /** Sends ESC/POS data (base64 from the server) to the chosen Bluetooth printer. */
-export async function printEscposOnDevice(chunks: string[]): Promise<void> {
+export async function printEscposOnDevice(t: Translate, chunks: string[]): Promise<void> {
   const np = nativePrinter();
-  if (!np) throw new Error("Bluetooth printing works in the OrderRestro app on a phone.");
+  if (!np) throw new Error(t("Bluetooth printing works in the OrderRestro app on a phone."));
   let printer = savedBtPrinter();
   if (!printer) {
     printer = await chooseBtPrinter();
-    if (!printer) throw new PrinterNotChosen();
+    if (!printer) throw new PrinterNotChosen(t);
     saveBtPrinter(printer);
   }
   for (const data of chunks) await np.btPrint({ address: printer.address, data });
 }
 
 /** Opens Android's print dialog for a bill / receipt / ticket (Save as PDF or any printer). */
-export async function printHtmlOnDevice(html: string, name: string): Promise<void> {
+export async function printHtmlOnDevice(t: Translate, html: string, name: string): Promise<void> {
   const np = nativePrinter();
-  if (!np) throw new Error("Not available outside the app");
+  if (!np) throw new Error(t("Not available outside the app"));
   await np.printHtml({ html, name });
 }

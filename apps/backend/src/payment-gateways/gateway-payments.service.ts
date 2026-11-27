@@ -5,7 +5,13 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import type { GatewayPayment } from '@prisma/client';
+import {
+  Prisma,
+  type GatewayPayment,
+  type GatewayPaymentStatus,
+  type GatewayRefund,
+  type Order,
+} from '@prisma/client';
 import { round2 } from '../modules/orders/pricing';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../modules/orders/orders.service';
@@ -25,6 +31,14 @@ import { PaymentGatewaysService } from './payment-gateways.service';
 const REUSE_WINDOW_MS = 30 * 60_000;
 // The public return page may be refreshed; never hit the provider more than once in this window per payment.
 const MIN_REFRESH_GAP_MS = 2_000;
+// A claim younger than this is assumed to still have a live checkout owner.
+const RECOVERY_ABANDONED_MS = 2 * 60_000;
+// Refusals that prove the provider did not create the refund. 429 and 5xx are
+// deliberately absent: the request may have succeeded before the response was
+// lost. 409 is absent too: providers use it for "a request with this
+// idempotency key is still in flight" (Stripe), which says the first attempt
+// may yet succeed. All of those keep the hold and go to review.
+const DEFINITE_REFUND_REJECTIONS = new Set([400, 401, 403, 404, 422]);
 
 export class WebhookRejected extends Error {}
 
@@ -87,31 +101,15 @@ export class GatewayPaymentsService {
       );
     }
 
-    const order = await this.prisma.order.findFirst({
-      where: { id: orderId, branchId },
-      select: { id: true, status: true, acceptance: true, orderNumber: true },
-    });
-    if (!order) throw new NotFoundException('Order not found');
-    if (order.status !== 'OPEN') {
-      throw new BadRequestException('Order is not open for payment');
-    }
-    if (order.acceptance === 'PENDING') {
-      throw new ConflictException('Accept this order before taking payment');
-    }
-
     // The amount is ours, from the server-side bill. The client never supplies it.
     const bill = await this.orders.previewBill(branchId, orderId, {});
     const balance = Number(bill.balanceDue);
-    if (!(balance > 0))
-      throw new BadRequestException('Nothing is due on this order');
     const restaurant = await this.prisma.restaurant.findUniqueOrThrow({
       where: { id: restaurantId },
       select: { currency: true, name: true },
     });
     const currency = restaurant.currency.toUpperCase();
     const amountMinor = toMinor(balance, currency);
-    if (amountMinor <= 0)
-      throw new BadRequestException('Nothing is due on this order');
 
     if (adapter.requiresCustomerPhone && !input.customerPhone) {
       throw new BadRequestException(
@@ -119,34 +117,56 @@ export class GatewayPaymentsService {
       );
     }
 
-    // Reuse an open link for the same bill instead of creating a second one.
-    const reusable = await this.prisma.gatewayPayment.findFirst({
-      where: {
-        orderId,
-        provider: connection.provider,
-        mode,
-        status: 'CREATED',
-        amountMinor,
-        currency,
-        checkoutUrl: { not: null },
-        createdAt: { gt: new Date(Date.now() - REUSE_WINDOW_MS) },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (reusable) return this.present(reusable);
+    const { row, orderNumber } = await this.prisma.$transaction(async (tx) => {
+      // Reserve the attempt while the order is still open. Deletion takes
+      // this same lock and must see the CREATED row before it can proceed.
+      const [order] = await tx.$queryRaw<
+        Pick<Order, 'status' | 'acceptance' | 'orderNumber'>[]
+      >`
+        SELECT status, acceptance, "orderNumber" FROM orders
+        WHERE id = ${orderId} AND "branchId" = ${branchId} FOR UPDATE
+      `;
+      if (!order) throw new NotFoundException('Order not found');
+      if (order.status !== 'OPEN') {
+        throw new BadRequestException('Order is not open for payment');
+      }
+      if (order.acceptance === 'PENDING') {
+        throw new ConflictException('Accept this order before taking payment');
+      }
+      if (!(amountMinor > 0))
+        throw new BadRequestException('Nothing is due on this order');
 
-    const row = await this.prisma.gatewayPayment.create({
-      data: {
-        restaurantId,
-        branchId,
-        orderId,
-        provider: connection.provider,
-        mode,
-        amountMinor,
-        currency,
-        createdById: userId,
-      },
+      const reusable = await tx.gatewayPayment.findFirst({
+        where: {
+          orderId,
+          provider: connection.provider,
+          mode,
+          status: 'CREATED',
+          amountMinor,
+          currency,
+          checkoutUrl: { not: null },
+          createdAt: { gt: new Date(Date.now() - REUSE_WINDOW_MS) },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      const row =
+        reusable ??
+        (await tx.gatewayPayment.create({
+          data: {
+            restaurantId,
+            branchId,
+            orderId,
+            provider: connection.provider,
+            mode,
+            amountMinor,
+            currency,
+            createdById: userId,
+          },
+        }));
+      return { row, orderNumber: order.orderNumber };
     });
+    if (row.checkoutUrl !== null) return this.present(row);
+
     const base = this.baseUrl(input.origin);
     try {
       const ctx = this.gateways.context(restaurantId, connection, mode);
@@ -154,7 +174,7 @@ export class GatewayPaymentsService {
         amountMinor,
         currency,
         reference: row.id,
-        description: `${restaurant.name} - order ${order.orderNumber}`,
+        description: `${restaurant.name} - order ${orderNumber}`,
         returnUrl: `${base}/pay/return?gp=${row.id}`,
         notifyUrl: `${base}/api/v1/payment-gateways/webhook/${restaurantId}/${connection.provider}/${mode}`,
         customer: { name: input.customerName, phone: input.customerPhone },
@@ -190,7 +210,7 @@ export class GatewayPaymentsService {
     id: string,
     scope?: { restaurantId: string; branchId?: string },
   ) {
-    let p = await this.prisma.gatewayPayment.findFirst({
+    const p = await this.prisma.gatewayPayment.findFirst({
       where: {
         id,
         ...(scope ? { restaurantId: scope.restaurantId } : {}),
@@ -241,11 +261,9 @@ export class GatewayPaymentsService {
     }
 
     if (remote.state === 'EXPIRED') {
-      p = await this.prisma.gatewayPayment.update({
-        where: { id: p.id },
-        data: { status: 'EXPIRED' },
-      });
-      return this.present(p);
+      return this.present(
+        await this.updateUnclaimed(p.id, ['CREATED'], { status: 'EXPIRED' }),
+      );
     }
     if (remote.state !== 'PAID') return this.present(p);
 
@@ -255,17 +273,29 @@ export class GatewayPaymentsService {
       remote.paidMinor !== p.amountMinor ||
       (remote.reference != null && remote.reference !== p.id);
     if (mismatch) {
-      p = await this.prisma.gatewayPayment.update({
-        where: { id: p.id },
-        data: {
+      return this.present(
+        await this.updateUnclaimed(p.id, ['CREATED', 'NEEDS_REVIEW'], {
           status: 'NEEDS_REVIEW',
           providerPaymentId: remote.providerPaymentId ?? p.providerPaymentId,
           note: 'The provider reports an amount, currency or reference different from what was requested. Check it in the provider dashboard.',
-        },
-      });
-      return this.present(p);
+        }),
+      );
     }
     return this.present(await this.apply(p, remote.providerPaymentId ?? null));
+  }
+
+  // A provider call runs outside the database. A slower poll or webhook must
+  // not reopen a terminal attempt, or expire one already claimed for checkout.
+  private async updateUnclaimed(
+    id: string,
+    statuses: GatewayPaymentStatus[],
+    data: Prisma.GatewayPaymentUpdateManyMutationInput,
+  ) {
+    await this.prisma.gatewayPayment.updateMany({
+      where: { id, status: { in: statuses }, appliedAt: null },
+      data,
+    });
+    return this.prisma.gatewayPayment.findUniqueOrThrow({ where: { id } });
   }
 
   /** Settles the order once, however many times this is reached. */
@@ -273,13 +303,10 @@ export class GatewayPaymentsService {
     if (p.mode === 'TEST') {
       // A test payment proves the wiring but moved no money, so it must not
       // mark a real order as paid.
-      return this.prisma.gatewayPayment.update({
-        where: { id: p.id },
-        data: {
-          status: 'SUCCEEDED',
-          providerPaymentId,
-          note: 'Test payment: no real money moved and the order was left unpaid.',
-        },
+      return this.updateUnclaimed(p.id, ['CREATED', 'NEEDS_REVIEW'], {
+        status: 'SUCCEEDED',
+        providerPaymentId,
+        note: 'Test payment: no real money moved and the order was left unpaid.',
       });
     }
     // Atomic claim: only one caller (webhook, return page, poll) gets past this.
@@ -292,16 +319,76 @@ export class GatewayPaymentsService {
       data: { appliedAt: new Date(), providerPaymentId },
     });
     if (claimed.count === 0) {
-      return this.prisma.gatewayPayment.findUniqueOrThrow({
+      const current = await this.prisma.gatewayPayment.findUniqueOrThrow({
         where: { id: p.id },
       });
+      if (current.appliedAt && current.status !== 'SUCCEEDED') {
+        // The crash window: another caller (or an earlier process) claimed the
+        // payment, checkout committed, but the final status write never ran.
+        // Check for the local Payment that checkout creates with our id as its
+        // requestId, then finalize or flag it. Never silently return CREATED.
+        const settled = await this.prisma.payment.findFirst({
+          where: { orderId: current.orderId, clientRequestId: current.id },
+          select: { id: true },
+        });
+        if (settled) {
+          // Checkout committed before the kitchen release ran. Release now;
+          // this is a no-op if the original owner already did it.
+          try {
+            await this.orders.releaseHeldOrder(
+              current.branchId,
+              current.orderId,
+            );
+          } catch (e) {
+            this.logger.error(
+              `Could not release order ${current.orderId} during recovery: ${(e as Error).message}`,
+            );
+          }
+          return this.prisma.gatewayPayment.update({
+            where: { id: current.id },
+            data: { status: 'SUCCEEDED', note: null },
+          });
+        }
+        // A second confirmation can arrive while the claim owner is still in
+        // checkout. Give it time to commit before calling the claim abandoned.
+        if (
+          current.appliedAt &&
+          Date.now() - current.appliedAt.getTime() < RECOVERY_ABANDONED_MS
+        ) {
+          return current;
+        }
+        // Conditional: the owner may have committed checkout (and written
+        // SUCCEEDED) while we were looking. Never overwrite that result.
+        await this.prisma.gatewayPayment.updateMany({
+          where: {
+            id: current.id,
+            appliedAt: current.appliedAt,
+            status: { in: ['CREATED', 'NEEDS_REVIEW'] },
+          },
+          data: {
+            status: 'NEEDS_REVIEW',
+            note: 'Payment was claimed but no local payment was recorded. Check the provider before retrying.',
+          },
+        });
+        return this.prisma.gatewayPayment.findUniqueOrThrow({
+          where: { id: current.id },
+        });
+      }
+      return current;
     }
     try {
+      // Zero-decimal currencies (JPY/KRW/VND...) are charged as whole units,
+      // while the books keep two decimals. A 94.50 balance becomes a 95-unit
+      // charge; recording 95 would over-tender and flag a confirmed payment
+      // as NEEDS_REVIEW. Cap the booked amount at what the bill still owes.
+      const bill = await this.orders.previewBill(p.branchId, p.orderId, {});
+      const balanceDue = Number(bill.balanceDue);
+      const booked = Math.min(fromMinor(p.amountMinor, p.currency), balanceDue);
       await this.orders.checkout(p.branchId, p.orderId, p.createdById, {
         payments: [
           {
             method: 'OTHER',
-            amount: fromMinor(p.amountMinor, p.currency),
+            amount: booked,
             reference:
               `${p.provider}:${providerPaymentId ?? p.providerRef}`.slice(
                 0,
@@ -312,6 +399,15 @@ export class GatewayPaymentsService {
         allowPartial: true,
         requestId: p.id,
       });
+      // A table order that was waiting for this payment goes to the kitchen now, never before.
+      // Isolated: a problem releasing the order must never turn a confirmed payment into "needs review".
+      try {
+        await this.orders.releaseHeldOrder(p.branchId, p.orderId);
+      } catch (e) {
+        this.logger.error(
+          `Could not release order ${p.orderId} after payment: ${(e as Error).message}`,
+        );
+      }
       return await this.prisma.gatewayPayment.update({
         where: { id: p.id },
         data: { status: 'SUCCEEDED', note: null },
@@ -367,6 +463,17 @@ export class GatewayPaymentsService {
       throw new WebhookRejected();
     }
 
+    // Only the signed-body hash is trusted for dedup. The legacy header is
+    // not covered by the provider's HMAC, so a holder of a valid signed body
+    // could pair it with an arbitrary old id and suppress a real event. A
+    // legacy-only match therefore still runs refresh; both keys are recorded
+    // afterwards so later deliveries of the same body hash dedupe normally.
+    const keys = [
+      verified.eventId,
+      ...(verified.legacyEventId && verified.legacyEventId !== verified.eventId
+        ? [verified.legacyEventId]
+        : []),
+    ];
     const seen = await this.prisma.gatewayWebhookEvent.findUnique({
       where: {
         provider_mode_eventId: { provider, mode, eventId: verified.eventId },
@@ -391,7 +498,10 @@ export class GatewayPaymentsService {
     }
     // Recorded only after successful handling, so a failure is retried by the provider.
     await this.prisma.gatewayWebhookEvent
-      .create({ data: { provider, mode, eventId: verified.eventId } })
+      .createMany({
+        data: keys.map((eventId) => ({ provider, mode, eventId })),
+        skipDuplicates: true,
+      })
       .catch(() => undefined);
     return { duplicate: false };
   }
@@ -450,33 +560,64 @@ export class GatewayPaymentsService {
     if (amountMinor <= 0)
       throw new BadRequestException('Enter an amount to refund');
 
-    // Local limits first, so we never refund at the provider what the books would reject.
-    const order = await this.prisma.order.findFirst({
-      where: { id: p.orderId, branchId },
-      select: { totalAmount: true, status: true },
-    });
-    if (!order || order.status !== 'PAID') {
-      throw new BadRequestException('Only a paid order can be refunded');
-    }
-    const prior = await this.prisma.refund.aggregate({
-      where: { orderId: p.orderId },
-      _sum: { amount: true },
-    });
-    const localLeft = round2(
-      Number(order.totalAmount) - Number(prior._sum.amount ?? 0),
-    );
-    if (input.amount > localLeft) {
-      throw new BadRequestException(
-        `Only ${localLeft} remains refundable on this order`,
-      );
-    }
-
-    // Reserve the amount: pending and needs-review refunds count against the payment.
+    // Reserve the amount in one transaction. Both the order row and the
+    // payment row are locked here: checking the local refundable balance
+    // before the transaction let two concurrent gateway refunds on the same
+    // order both pass, reach the provider, and pay the customer twice before
+    // the local `orders.refund()` row lock rejected the second one.
     const row = await this.prisma.$transaction(async (tx) => {
+      const lockedOrder = await tx.order.updateMany({
+        where: { id: p.orderId, branchId },
+        data: { updatedAt: new Date() },
+      }); // per-order row lock
+      if (lockedOrder.count === 0) {
+        throw new BadRequestException('Only a paid order can be refunded');
+      }
       await tx.gatewayPayment.update({
         where: { id: p.id },
         data: { updatedAt: new Date() },
       }); // row lock
+      const order = await tx.order.findFirst({
+        where: { id: p.orderId, branchId },
+        select: { totalAmount: true, status: true },
+      });
+      if (!order || order.status !== 'PAID') {
+        throw new BadRequestException('Only a paid order can be refunded');
+      }
+      const prior = await tx.refund.aggregate({
+        where: { orderId: p.orderId },
+        _sum: { amount: true },
+      });
+      // Refunds already sent to a provider but not yet recorded locally also
+      // count against the order, otherwise a second payment on the same order
+      // could exceed the book's refundable amount while the first is in flight.
+      const heldForOrder = await tx.gatewayRefund.findMany({
+        where: {
+          orderId: p.orderId,
+          // Once linked to a local Refund the amount is already in `prior`.
+          // Counting it here as well would report only half the balance after
+          // a successful refund. The per-payment limit below still counts all
+          // rows, since that limits how much this payment can ever refund.
+          refundId: null,
+          status: { in: ['PENDING', 'SUCCEEDED', 'NEEDS_REVIEW'] },
+          currency: p.currency,
+        },
+        select: { amountMinor: true },
+      });
+      const heldLocal = round2(
+        heldForOrder.reduce(
+          (sum, r) => sum + fromMinor(r.amountMinor, p.currency),
+          0,
+        ),
+      );
+      const localLeft = round2(
+        Number(order.totalAmount) - Number(prior._sum.amount ?? 0) - heldLocal,
+      );
+      if (input.amount > localLeft) {
+        throw new BadRequestException(
+          `Only ${localLeft} remains refundable on this order`,
+        );
+      }
       const held = await tx.gatewayRefund.aggregate({
         where: {
           gatewayPaymentId: p.id,
@@ -505,6 +646,7 @@ export class GatewayPaymentsService {
     });
 
     let providerRefundId: string;
+    let providerState: 'DONE' | 'PENDING' = 'DONE';
     try {
       const r = await adapter.refund(
         this.gateways.context(restaurantId, conn, p.mode),
@@ -516,8 +658,14 @@ export class GatewayPaymentsService {
         },
       );
       providerRefundId = r.providerRefundId;
+      providerState = r.state ?? 'DONE';
     } catch (e) {
-      const definite = e instanceof GatewayError && e.status !== undefined;
+      // Only an explicit client rejection proves the refund did not happen.
+      // A 429 or 5xx may be returned *after* the provider accepted it, so it
+      // must keep the hold and go to review rather than releasing it here.
+      const status = e instanceof GatewayError ? e.status : undefined;
+      const definite =
+        status !== undefined && DEFINITE_REFUND_REJECTIONS.has(status);
       const msg = e instanceof GatewayError ? e.message : 'Refund failed';
       await this.prisma.gatewayRefund.update({
         where: { id: row.id },
@@ -536,21 +684,35 @@ export class GatewayPaymentsService {
     }
 
     try {
-      const local = await this.orders.refund(branchId, p.orderId, userId, {
-        amount: input.amount,
-        method: 'OTHER',
-        reason: input.reason
-          ? `${input.reason} (via ${adapter.name})`
-          : `Refunded via ${adapter.name}`,
-        returnedItems: input.returnedItems,
-      });
+      await this.orders.refund(
+        branchId,
+        p.orderId,
+        userId,
+        {
+          amount: input.amount,
+          method: 'OTHER',
+          reason: input.reason
+            ? `${input.reason} (via ${adapter.name})`
+            : `Refunded via ${adapter.name}`,
+          returnedItems: input.returnedItems,
+        },
+        undefined,
+        row.id, // OrdersService links the reservation in its own transaction.
+      );
       await this.prisma.gatewayRefund.update({
         where: { id: row.id },
         data: {
-          status: 'SUCCEEDED',
+          // A provider that accepted the refund but has not finalised it must
+          // stay reconcilable. A SUCCEEDED row is never revisited by
+          // refundsNeedingReview(), so a later reversal would go unnoticed.
+          // The local Refund above is linked via `refundId`, so the hold is
+          // already counted in the book's paid-back total either way.
+          status: providerState === 'PENDING' ? 'PENDING' : 'SUCCEEDED',
           providerRefundId,
-          refundId: (local as { id: string }).id,
-          note: null,
+          note:
+            providerState === 'PENDING'
+              ? 'The provider accepted this refund but has not finalised it yet. Its status is checked automatically.'
+              : null,
         },
       });
       return {
@@ -580,10 +742,160 @@ export class GatewayPaymentsService {
     }
   }
 
+  /**
+   * Ask the provider what happened to a refund whose result was never written.
+   * We only change our row; we never re-send money or invent a local Refund.
+   * A confirmed-but-unrecorded refund stays in the review list for an operator.
+   */
+  private async reconcileStaleRefund(r: GatewayRefund) {
+    if (!r.providerRefundId) return; // provider call never got far enough to identify it
+    const [payment, connection, entry] = await Promise.all([
+      this.prisma.gatewayPayment.findUnique({
+        where: { id: r.gatewayPaymentId },
+        select: { mode: true },
+      }),
+      this.prisma.paymentGatewayConnection.findUnique({
+        where: {
+          restaurantId_provider: {
+            restaurantId: r.restaurantId,
+            provider: r.provider,
+          },
+        },
+      }),
+      this.prisma.paymentGatewayCatalogEntry.findFirst({
+        where: {
+          key: r.provider,
+          OR: [{ restaurantId: r.restaurantId }, { restaurantId: null }],
+        },
+        orderBy: { restaurantId: 'desc' },
+      }),
+    ]);
+    if (!payment || !connection) return;
+    const adapter = getAdapter(entry?.adapter);
+    if (!adapter?.fetchRefundStatus) return;
+    try {
+      const remote = await adapter.fetchRefundStatus(
+        this.gateways.context(r.restaurantId, connection, payment.mode),
+        r.providerRefundId,
+      );
+      if (remote.state === 'DONE') {
+        await this.prisma.gatewayRefund.updateMany({
+          where: { id: r.id, status: 'PENDING', refundId: r.refundId },
+          data: r.refundId
+            ? {
+                status: 'SUCCEEDED',
+                providerRefundId: remote.providerRefundId,
+                note: null,
+              }
+            : {
+                status: 'NEEDS_REVIEW',
+                providerRefundId: remote.providerRefundId,
+                note: 'The provider confirms this refund succeeded, but no local Refund was recorded. Record it manually; do not retry here.',
+              },
+        });
+      } else if (remote.state === 'FAILED') {
+        // Releases the hold: FAILED rows are no longer counted as refundable.
+        await this.prisma.gatewayRefund.updateMany({
+          where: { id: r.id, status: 'PENDING', refundId: r.refundId },
+          data: {
+            // A linked row still backs a local Refund that reduces the order's
+            // refundable balance. Leave it in the review list with its note;
+            // marking it FAILED would hide it from the only place an operator
+            // can see that manual intervention is needed.
+            status: r.refundId ? 'NEEDS_REVIEW' : 'FAILED',
+            note: r.refundId
+              ? 'The provider confirms this refund failed, but a local Refund was already recorded and still counts against the order. The customer has not been paid back through the gateway: pay them another way, then use "Mark as settled outside the gateway" in Settings > Payments to close this entry.'
+              : 'The provider confirms this refund failed.',
+          },
+        });
+      }
+      // PENDING stays PENDING and is surfaced in the review list.
+    } catch {
+      // Provider unreachable or unknown refund: leave the row untouched.
+    }
+  }
+
+  /**
+   * Closes a refund the operator has checked by hand. Never talks to the
+   * provider and never moves money.
+   *  - NOT_REFUNDED_AT_PROVIDER: only for an entry with no local Refund. The
+   *    owner checked the provider dashboard and no refund exists, so the hold
+   *    is released and the order can be refunded again.
+   *  - SETTLED_OUTSIDE_GATEWAY: only for an entry whose local Refund exists
+   *    (the provider failed it). The local Refund stays as the record that the
+   *    customer was owed the money; the owner has paid them another way.
+   * The conditional update makes a double click or two owners racing a no-op.
+   */
+  async resolveRefundReview(
+    restaurantId: string,
+    id: string,
+    userId: string,
+    outcome: 'NOT_REFUNDED_AT_PROVIDER' | 'SETTLED_OUTSIDE_GATEWAY',
+    note: string,
+  ) {
+    const row = await this.prisma.gatewayRefund.findFirst({
+      where: { id, restaurantId },
+    });
+    if (!row) throw new NotFoundException('Refund not found');
+    if (row.status !== 'NEEDS_REVIEW') {
+      throw new BadRequestException('This refund is not waiting for review');
+    }
+    const linked = !!row.refundId;
+    if (outcome === 'NOT_REFUNDED_AT_PROVIDER' && linked) {
+      throw new BadRequestException(
+        'A local Refund is already recorded for this entry, so the hold cannot be released. If the customer has been paid another way, mark it as settled outside the gateway.',
+      );
+    }
+    if (outcome === 'SETTLED_OUTSIDE_GATEWAY' && !linked) {
+      throw new BadRequestException(
+        'No local Refund was recorded for this entry. If you checked the provider dashboard and no refund exists, choose "not refunded at provider" to release the hold.',
+      );
+    }
+    const result = await this.prisma.gatewayRefund.updateMany({
+      where: { id, restaurantId, status: 'NEEDS_REVIEW' },
+      data: {
+        status: 'FAILED',
+        note:
+          outcome === 'SETTLED_OUTSIDE_GATEWAY'
+            ? `Closed by an owner: the customer was paid back outside the gateway. ${note}`
+            : `Closed by an owner after checking the provider: no refund exists there. ${note}`,
+      },
+    });
+    if (result.count === 0) {
+      throw new BadRequestException('This refund is not waiting for review');
+    }
+    this.logger.log(`gateway refund ${id} closed by ${userId}: ${outcome}`);
+    return { id, status: 'FAILED' as const };
+  }
+
   /** Refunds that need a person, newest first (shown on Settings > Payments). */
   async refundsNeedingReview(restaurantId: string) {
+    // A PENDING row is committed before the provider call. If the process dies
+    // before the follow-up write, nothing else resolves it, yet it keeps a
+    // hold on the whole order. Surface stale ones for an operator to check in
+    // the provider dashboard; we never auto-release or finalise them here.
+    const staleBefore = new Date(Date.now() - 10 * 60_000);
+    const where: Prisma.GatewayRefundWhereInput = {
+      restaurantId,
+      OR: [
+        { status: 'NEEDS_REVIEW' },
+        { status: 'PENDING', createdAt: { lt: staleBefore } },
+      ],
+    };
+    const stale = await this.prisma.gatewayRefund.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    // Reconcile with the provider before showing the list, then re-read so the
+    // statuses and notes reflect what we just learned.
+    await Promise.all(
+      stale
+        .filter((r) => r.status === 'PENDING')
+        .map((r) => this.reconcileStaleRefund(r)),
+    );
     const rows = await this.prisma.gatewayRefund.findMany({
-      where: { restaurantId, status: 'NEEDS_REVIEW' },
+      where,
       orderBy: { createdAt: 'desc' },
       take: 20,
     });
@@ -591,9 +903,14 @@ export class GatewayPaymentsService {
       id: r.id,
       orderId: r.orderId,
       provider: r.provider,
+      hasLocalRefund: !!r.refundId,
+      status: r.status,
       amountMinor: r.amountMinor,
       currency: r.currency,
-      note: r.note,
+      note:
+        r.status === 'PENDING'
+          ? 'Stuck before the provider result was recorded. Check the provider dashboard; do not retry here.'
+          : r.note,
       providerRefundId: r.providerRefundId,
       createdAt: r.createdAt,
     }));
@@ -676,8 +993,15 @@ export class GatewayPaymentsService {
 
   /** Everything the payer-facing return page may learn: a status word, nothing else. */
   async publicStatus(id: string) {
-    const p = await this.refresh(id).catch(() => null);
-    if (!p) throw new NotFoundException('Payment not found');
+    // Distinguish "no such payment" from a failure during settlement
+    // recovery: the return page should retry operational errors, not tell the
+    // customer their payment vanished.
+    const exists = await this.prisma.gatewayPayment.findFirst({
+      where: { id },
+      select: { id: true },
+    });
+    if (!exists) throw new NotFoundException('Payment not found');
+    const p = await this.refresh(id);
     return { status: p.status, test: p.mode === 'TEST' };
   }
 

@@ -1,5 +1,7 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n/context";
+import { useStaffFormat } from "@/hooks/use-staff-format";
 import { KOT_NEXT_STATUS, type KotStatusDto } from "@nodedr-restaurant/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useSyncExternalStore } from "react";
@@ -86,22 +88,25 @@ export function useKdsTicketsWithPending(tickets: KotTicket[] | undefined) {
 }
 
 export function useUpdateKotStatus(branchId: string | null) {
+  const { t } = useI18n();
+  const fmt = useStaffFormat();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, status }: { id: string; status: KotStatusDto }) => {
       const path = `/kds/tickets/${id}/status?branchId=${branchId}`;
       try {
-        return await api.patch(path, { status });
+        return await api.patch(path, { status }, { signal: AbortSignal.timeout(15_000) });
       } catch (e) {
         // No connection: keep the step on the phone and send it, in order, when the server is back.
         if (!isNativeApp() || !isNetworkError(e)) throw e;
-        outbox.add({
+        const saved = outbox.add({
           method: "PATCH",
           path,
           body: { status },
-          label: `Ticket ${status.toLowerCase()}`,
+          label: t("Ticket {value}", { value: fmt.code(status) }),
           meta: { kind: "kot-status", id, status },
         });
+        if (!saved) throw new Error(t("This phone could not save the update (storage full). Free some space and try again."));
         return null;
       }
     },
@@ -205,22 +210,24 @@ export function useKdsProgress(branchId: string | null) {
 }
 
 export function useSetKotPriority(branchId: string | null) {
+  const { t } = useI18n();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, isPriority }: { id: string; isPriority: boolean }) => {
       const path = `/kds/tickets/${id}/priority?branchId=${branchId}`;
       try {
-        return await api.patch(path, { isPriority });
+        return await api.patch(path, { isPriority }, { signal: AbortSignal.timeout(15_000) });
       } catch (e) {
         if (!isNativeApp() || !isNetworkError(e)) throw e;
-        outbox.add({
+        const saved = outbox.add({
           method: "PATCH",
           path,
           body: { isPriority },
-          label: isPriority ? "Ticket starred" : "Ticket unstarred",
+          label: isPriority ? t("Ticket starred") : t("Ticket unstarred"),
           group: `kot-priority:${id}`,
           meta: { kind: "kot-priority", id, isPriority },
         });
+        if (!saved) throw new Error(t("This phone could not save the update (storage full). Free some space and try again."));
         return null;
       }
     },

@@ -7,7 +7,7 @@ let dbp;
 function open() {
   if (!dbp) {
     dbp = new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB, 4);
+      const req = indexedDB.open(DB, 6);
       req.onupgradeneeded = () => {
         // Only add what is missing: a phone upgrading from v1 keeps its sales and settings untouched.
         const db = req.result;
@@ -22,6 +22,8 @@ function open() {
         if (!db.objectStoreNames.contains('refunds')) db.createObjectStore('refunds', { keyPath: 'id' }); // money paid back on a sale
         if (!db.objectStoreNames.contains('expenses')) db.createObjectStore('expenses', { keyPath: 'id' }); // money paid out
         if (!db.objectStoreNames.contains('reservations')) db.createObjectStore('reservations', { keyPath: 'id' }); // table bookings
+        if (!db.objectStoreNames.contains('events')) db.createObjectStore('events', { keyPath: 'id' }); // kitchen events waiting for the server
+        if (!db.objectStoreNames.contains('peerSales')) db.createObjectStore('peerSales', { keyPath: 'id' }); // sales handed over by a nearby phone, held until uploaded
         if (!db.objectStoreNames.contains('shifts')) db.createObjectStore('shifts', { keyPath: 'day' }); // closed days (cash counted)
       };
       req.onsuccess = () => resolve(req.result);
@@ -48,15 +50,63 @@ export const kv = {
   get: (k) => tx('kv', 'readonly', (s) => s.get(k)),
   set: (k, v) => tx('kv', 'readwrite', (s) => s.put(v, k)),
   del: (k) => tx('kv', 'readwrite', (s) => s.delete(k)),
+  /** Apply a change to the latest value, leaving newer or deleted snapshots intact. */
+  update: (k, change) => tx('kv', 'readwrite', (store) => {
+    const read = store.get(k);
+    read.onsuccess = () => {
+      const next = change(read.result);
+      if (next !== read.result) store.put(next, k);
+    };
+  }),
+  /** Several keys in ONE transaction: all land or none do. */
+  setMany: (entries) =>
+    tx('kv', 'readwrite', (s) => {
+      for (const [k, v] of entries) s.put(v, k);
+    }),
 };
 
 export const sales = {
   put: (sale) => tx('sales', 'readwrite', (s) => s.put(sale)),
   get: (id) => tx('sales', 'readonly', (s) => s.get(id)),
+  // Read, merge and write in ONE readwrite transaction. A separate get/put
+  // pair lets a concurrent collection update be overwritten by a sync result.
+  merge: (id, merge) =>
+    open().then(
+      (db) =>
+        new Promise((resolve, reject) => {
+          const t = db.transaction('sales', 'readwrite');
+          const store = t.objectStore('sales');
+          const req = store.get(id);
+          let result;
+          req.onsuccess = () => {
+            if (!req.result) {
+              result = null;
+              return;
+            }
+            result = merge(req.result);
+            if (result) store.put(result);
+          };
+          t.oncomplete = () => resolve(result);
+          t.onerror = () => reject(t.error);
+          t.onabort = () => reject(t.error);
+        }),
+    ),
   all: () => tx('sales', 'readonly', (s) => s.getAll()).then((a) => a.sort((x, y) => (x.soldAt < y.soldAt ? 1 : -1))),
   clear: () => tx('sales', 'readwrite', (s) => s.clear()),
   pending: () => sales.all().then((a) => a.filter((s) => s.status === 'pending')),
 };
+
+/** A checkout is durable together with the marker that lets the same cart finish it after a restart. */
+export async function savePendingSale(sale, sig) {
+  const db = await open();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction(['sales', 'kv'], 'readwrite');
+    t.objectStore('sales').put(sale);
+    t.objectStore('kv').put({ saleId: sale.id, sig, stockApplied: false }, 'pendingSale');
+    t.oncomplete = () => resolve();
+    t.onabort = () => reject(t.error ?? new Error('Saving the sale was interrupted.'));
+  });
+}
 
 export const orders = {
   put: (o) => tx('orders', 'readwrite', (s) => s.put(o)),
@@ -84,8 +134,27 @@ export const refunds = plain('refunds');
 export const expenses = plain('expenses');
 export const shifts = plain('shifts');
 export const reservations = plain('reservations');
+// Sales another phone handed over through Nearby. Kept apart from `sales` on purpose: they never enter this phone's
+// own sales list, till, numbering or reports. { id, sale, from:{deviceId,name}, receivedAt, status:'held'|'synced'|'refused', reason? }
+export const peerSales = plain('peerSales');
 
-const BACKUP_STORES = ['sales', 'orders', 'kots', 'refunds', 'expenses', 'shifts', 'reservations'];
+/** Which nearby phones have confirmed (on their disk) a copy of which of our sales: { saleId: [deviceId] }. */
+export const nearbyAcks = {
+  get: async () => (await kv.get('nearbyAcks')) || {},
+  add: (saleId, deviceId) =>
+    kv.update('nearbyAcks', (cur) => {
+      const m = { ...(cur || {}) };
+      const list = new Set(m[saleId] || []);
+      if (list.has(deviceId)) return cur;
+      list.add(deviceId);
+      m[saleId] = [...list];
+      return m;
+    }),
+};
+
+// `events` is the outbox of unsent money/kitchen records (expenses, refunds, collections, till closes). A backup
+// without it restores local rows whose server-side record was never sent.
+const BACKUP_STORES = ['sales', 'orders', 'kots', 'refunds', 'expenses', 'shifts', 'reservations', 'events'];
 
 /** Everything on the phone except the account password, read in one consistent transaction. */
 export async function readEverything() {
@@ -99,10 +168,47 @@ export async function readEverything() {
     }
     const k = t.objectStore('kv').get('snapshot');
     k.onsuccess = () => (out.snapshot = k.result);
+    // Numbering counters live in kv, not in a store. Back them up too, or a
+    // restored phone reissues receipt/bill/KOT numbers from 001.
+    out.counters = {};
+    const keys = t.objectStore('kv').getAllKeys();
+    keys.onsuccess = () => {
+      for (const key of keys.result || []) {
+        if (!/^(seq|ordseq|kotseq):/.test(key)) continue;
+        const req = t.objectStore('kv').get(key);
+        req.onsuccess = () => { out.counters[key] = req.result; };
+      }
+    };
     t.oncomplete = resolve;
     t.onerror = t.onabort = () => reject(t.error);
   });
   return out;
+}
+
+/** Highest number already used per counter in a set of rows, read from the numbers themselves. */
+export function counterFloors(b) {
+  const floors = {};
+  const raise = (key, n) => {
+    if (Number.isFinite(n) && n > (floors[key] || 0)) floors[key] = n;
+  };
+  const dayOf = (iso) => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    return `${String(d.getFullYear()).slice(2)}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  };
+  for (const s of b.sales || []) {
+    const m = /^OFF-(\d{6})-(\d+)$/.exec(String(s.localNumber || s.number || ''));
+    if (m) raise(`seq:${m[1]}`, Number(m[2]));
+  }
+  for (const o of b.orders || []) {
+    const m = /^ORD-(\d{6})-(\d+)$/.exec(String(o.number || ''));
+    if (m) raise(`ordseq:${m[1]}`, Number(m[2]));
+  }
+  for (const k of b.kots || []) {
+    const day = dayOf(k.at || k.createdAt);
+    if (day && Number.isInteger(Number(k.number))) raise(`kotseq:${day}`, Number(k.number));
+  }
+  return floors;
 }
 
 /**
@@ -114,16 +220,65 @@ export async function replaceEverything(b) {
   await new Promise((resolve, reject) => {
     const t = db.transaction([...BACKUP_STORES, 'kv'], 'readwrite');
     for (const n of BACKUP_STORES) {
+      // A backup made before the outbox was included has no events: keep this phone's queue rather than wiping it.
+      if (n === 'events' && !Array.isArray(b.events)) continue;
       const st = t.objectStore(n);
       st.clear();
       for (const row of b[n] || []) st.put(row);
     }
     t.objectStore('kv').put(b.snapshot, 'snapshot');
+    const kvs = t.objectStore('kv');
+    if (b.counters) {
+      for (const [key, value] of Object.entries(b.counters)) {
+        if (!/^(seq|ordseq|kotseq):/.test(key)) continue;
+        // The backup's number is a floor, not an overwrite: sales taken after
+        // the backup may already have issued a higher number (and may have
+        // reached the server). Rewinding here reprints duplicate bills.
+        const g = kvs.get(key);
+        g.onsuccess = () => kvs.put(Math.max(Number(g.result) || 0, Number(value) || 0), key);
+      }
+    } else {
+      // A backup made before counters were included: never reissue a number that is in the restored data.
+      for (const [key, floor] of Object.entries(counterFloors(b))) {
+        const g = kvs.get(key);
+        g.onsuccess = () => kvs.put(Math.max(Number(g.result) || 0, floor), key);
+      }
+    }
     t.objectStore('kv').put(Date.now(), 'snapshotAt');
     t.objectStore('kv').delete('currentOrderId');
     t.oncomplete = resolve;
     t.onerror = t.onabort = () => reject(t.error);
   });
+}
+
+/**
+ * Finalise a checkout: mark the linked order PAID and consume the resume
+ * marker in ONE transaction. Killing the app between those two writes used to
+ * leave a stale marker whose signature matched the next identical purchase —
+ * the already-paid sale was reused and the new sale never recorded.
+ */
+export function completeCheckout(orderId, saleId, paidAt) {
+  return open().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const stores = orderId ? ['orders', 'kv'] : ['kv'];
+        const t = db.transaction(stores, 'readwrite');
+        if (orderId) {
+          const os = t.objectStore('orders');
+          const req = os.get(orderId);
+          req.onsuccess = () => {
+            const current = req.result;
+            if (current) {
+              os.put({ ...current, status: 'PAID', saleId, paidAt });
+            }
+          };
+        }
+        t.objectStore('kv').delete('pendingSale');
+        t.oncomplete = () => resolve();
+        // A request error bubbles before the transaction finishes rolling back.
+        t.onabort = () => reject(t.error ?? new Error('Finishing the sale was interrupted.'));
+      }),
+  );
 }
 
 /**
@@ -145,12 +300,34 @@ export function saveKotWithOrder(kot, order) {
   );
 }
 
+/**
+ * Add one to a counter and return the new value, atomically. Reading and writing in two separate
+ * transactions let two quick taps read the same value and hand out the same number twice; a single
+ * readwrite transaction on the store is serialized by IndexedDB, so every caller gets its own.
+ */
+function bump(key) {
+  return open().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const t = db.transaction('kv', 'readwrite');
+        const st = t.objectStore('kv');
+        let n = 0;
+        const g = st.get(key);
+        g.onsuccess = () => {
+          n = (Number(g.result) || 0) + 1;
+          st.put(n, key);
+        };
+        t.oncomplete = () => resolve(n);
+        t.onerror = t.onabort = () => reject(t.error);
+      }),
+  );
+}
+
 /** ORD-YYMMDD-NNN, the name of an order while it is open or held. */
 export async function nextOrderNumber(now = new Date()) {
   const d = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
   const key = `ordseq:${d}`;
-  const n = ((await kv.get(key)) || 0) + 1;
-  await kv.set(key, n);
+  const n = await bump(key);
   return `ORD-${d}-${String(n).padStart(3, '0')}`;
 }
 
@@ -158,8 +335,7 @@ export async function nextOrderNumber(now = new Date()) {
 export async function nextKotNumber(now = new Date()) {
   const d = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
   const key = `kotseq:${d}`;
-  const n = ((await kv.get(key)) || 0) + 1;
-  await kv.set(key, n);
+  const n = await bump(key);
   return n;
 }
 
@@ -167,10 +343,16 @@ export async function nextKotNumber(now = new Date()) {
 export async function nextLocalNumber(now = new Date()) {
   const d = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
   const key = `seq:${d}`;
-  const n = ((await kv.get(key)) || 0) + 1;
-  await kv.set(key, n);
+  const n = await bump(key);
   return `OFF-${d}-${String(n).padStart(3, '0')}`;
 }
 
 export const newId = () =>
   (globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`);
+
+export const events = {
+  put: (e) => tx('events', 'readwrite', (s) => s.put(e)),
+  get: (id) => tx('events', 'readonly', (s) => s.get(id)),
+  del: (id) => tx('events', 'readwrite', (s) => s.delete(id)),
+  all: () => tx('events', 'readonly', (s) => s.getAll()).then((a) => a.sort((x, y) => (x.createdAt < y.createdAt ? 1 : -1))),
+};
